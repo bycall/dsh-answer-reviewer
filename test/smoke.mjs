@@ -5,8 +5,9 @@
  * Runs without a live dsh host. Self-bootstraps node_modules symlinks for
  * the plugin's peer dependencies (resolved against the active dsh install)
  * so the ESM `import '@deepseek-ai/...'` statements work, then dynamically
- * imports the plugin and exercises every pure helper plus the fail-open
- * and skip-subagent branches of onTurnStopping with mock objects.
+ * imports the plugin and exercises every pure helper plus the fail-open,
+ * skip-subagent, and below-threshold branches of onTurnStopping with mock
+ * objects.
  *
  * Exit code 0 = all green.
  */
@@ -74,9 +75,11 @@ const {
   buildSteerMessage,
   createChallengeCounter,
   extractAssistantText,
+  extractUserPrompts,
+  isScoreAcceptable,
   name,
   onTurnStopping,
-  parseVerdict,
+  parseScore,
   resolveConfig,
 } = plugin
 
@@ -91,9 +94,10 @@ test('name exports the right plugin id', () => {
 test('resolveConfig applies defaults', () => {
   const c = resolveConfig(undefined)
   ok(c.enabled === true, 'enabled defaults to true')
-  ok(c.maxChallenges === 3, 'maxChallenges defaults to 3')
+  ok(c.maxChallenges === 5, `maxChallenges defaults to 5, got ${c.maxChallenges}`)
   ok(c.maxReviewTokens === 512, 'maxReviewTokens defaults to 512')
   ok(c.timeoutMs === 60_000, 'timeoutMs defaults to 60_000')
+  ok(c.threshold === 80, `threshold defaults to 80, got ${c.threshold}`)
   ok(c.reviewProvider === undefined, 'reviewProvider defaults undefined')
   ok(c.reviewModel === undefined, 'reviewModel defaults undefined')
 })
@@ -107,11 +111,19 @@ test('resolveConfig validates reviewProvider/reviewModel pair', () => {
   ok(threw2, 'reviewModel alone should throw')
 })
 
-test('resolveConfig clamps out-of-range integers', () => {
-  const c = resolveConfig({ maxChallenges: 999, maxReviewTokens: 0, timeoutMs: -1 })
+test('resolveConfig clamps out-of-range integers and threshold', () => {
+  const c = resolveConfig({ maxChallenges: 999, maxReviewTokens: 0, timeoutMs: -1, threshold: 150 })
   ok(c.maxChallenges === 8, `clamped to cap, got ${c.maxChallenges}`)
   ok(c.maxReviewTokens === 512, `falls back to default, got ${c.maxReviewTokens}`)
   ok(c.timeoutMs === 60_000, `falls back to default, got ${c.timeoutMs}`)
+  // threshold out-of-range is "invalid configuration" — we refuse it silently
+  // by falling back to DEFAULT (80), not by silently clamping to a different
+  // gate value the user did not ask for.
+  ok(c.threshold === 80, `out-of-range threshold falls back to default, got ${c.threshold}`)
+  const c2 = resolveConfig({ threshold: -5 })
+  ok(c2.threshold === 80, `threshold below 1 falls back to default, got ${c2.threshold}`)
+  const c3 = resolveConfig({ threshold: 73 })
+  ok(c3.threshold === 73, `threshold within range is preserved, got ${c3.threshold}`)
 })
 
 test('extractAssistantText concatenates text blocks for the turn', () => {
@@ -155,72 +167,136 @@ test('extractAssistantText skips interrupted messages', () => {
   ok(extractAssistantText(events, 1) === null, 'interrupted should yield null')
 })
 
-test('parseVerdict accepts clean JSON', () => {
-  const v = parseVerdict('{"verdict":"pass","reasons":[]}')
-  ok(v && v.verdict === 'pass', `got ${JSON.stringify(v)}`)
-  ok(v && v.reasons.length === 0, 'reasons empty on pass')
+test('extractUserPrompts concatenates user-source messages, drops plugin injections', () => {
+  const events = [
+    {
+      type: 'user/message',
+      data: {
+        message: { content: [{ type: 'text', text: 'first user question' }] },
+        source: { kind: 'user' },
+      },
+      seq: 0,
+    },
+    {
+      type: 'user/message',
+      data: {
+        message: { content: [{ type: 'text', text: 'AGENTS.md context' }] },
+        source: { kind: 'plugin', plugin: 'dsh-context' },
+      },
+      seq: 1,
+    },
+    {
+      type: 'user/message',
+      data: {
+        message: { content: [{ type: 'text', text: 'second user question' }] },
+        source: { kind: 'user' },
+      },
+      seq: 2,
+    },
+  ]
+  const out = extractUserPrompts(events)
+  ok(out && out.includes('first user question'), 'first user prompt included')
+  ok(out && !out.includes('AGENTS.md'), 'plugin-injected context filtered out')
+  ok(out && out.includes('second user question'), 'second user prompt included')
+  ok(out && out.includes('---'), 'separator between prompts')
 })
 
-test('parseVerdict strips surrounding markdown', () => {
-  const v = parseVerdict('Here you go:\n```json\n{"verdict":"fail","reasons":["short"]}\n```')
-  ok(v && v.verdict === 'fail', `verdict=${v && v.verdict}`)
-  ok(v && v.reasons.length === 1, `reasons=${JSON.stringify(v && v.reasons)}`)
+test('extractUserPrompts returns null when no real user prompts exist', () => {
+  const events = [
+    {
+      type: 'user/message',
+      data: { message: { content: [{ type: 'text', text: 'noise' }] }, source: { kind: 'plugin' } },
+      seq: 0,
+    },
+  ]
+  ok(extractUserPrompts(events) === null, 'null when only plugin injections exist')
 })
 
-test('parseVerdict fails closed on garbage', () => {
-  ok(parseVerdict('not json') === null, 'garbage is rejected')
-  ok(parseVerdict('') === null, 'empty is rejected')
-  ok(parseVerdict('{"verdict":"maybe","reasons":[]}') === null, 'unknown verdict is rejected')
+test('parseScore accepts clean JSON', () => {
+  const s = parseScore('{"score": 85, "reason": "well done"}')
+  ok(s && s.score === 85, `score=${s && s.score}`)
+  ok(s && s.reason === 'well done', `reason=${s && s.reason}`)
 })
 
-test('parseVerdict falls back to a single reason when fail lists none', () => {
-  const v = parseVerdict('{"verdict":"fail","reasons":[]}')
-  ok(v && v.verdict === 'fail', 'still fail')
-  ok(v && v.reasons.length === 1, `fallback reasons len=${v && v.reasons.length}`)
+test('parseScore strips surrounding markdown', () => {
+  const s = parseScore('Here you go:\n```json\n{"score": 45, "reason": "truncated"}\n```')
+  ok(s && s.score === 45, `score=${s && s.score}`)
+  ok(s && s.reason === 'truncated', `reason=${s && s.reason}`)
 })
 
-test('buildSteerMessage renders the challenge counter and findings', () => {
-  const v = { verdict: 'fail', reasons: ['truncated', 'mentions rm -rf'] }
-  const m = buildSteerMessage(v, 1, 3)
+test('parseScore fails closed on out-of-band scores (no silent clamp)', () => {
+  // Out-of-band scores are rejected, not silently clamped. Letting a model
+  // "buy" a pass by returning -1 or 9999 would defeat the gate.
+  ok(parseScore('{"score": -10, "reason": "x"}') === null, 'negative rejects')
+  ok(parseScore('{"score": 200, "reason": "x"}') === null, 'over-100 rejects')
+  ok(parseScore('{"score": 0, "reason": "x"}') === null, 'zero rejects (min is 1)')
+  ok(parseScore('{"score": "abc", "reason": "x"}') === null, 'non-numeric rejects')
+  ok(parseScore('{"score": null, "reason": "x"}') === null, 'null rejects')
+})
+
+test('parseScore fails closed on garbage', () => {
+  ok(parseScore('not json') === null, 'garbage rejected')
+  ok(parseScore('') === null, 'empty rejected')
+  ok(parseScore('{}') === null, 'no score rejected')
+  ok(parseScore('{"score": 50}') === null, 'missing reason rejected')
+})
+
+test('parseScore handles reason longer than 240 chars', () => {
+  const long = 'x'.repeat(300)
+  const s = parseScore(JSON.stringify({ score: 60, reason: long }))
+  ok(s && s.reason.length <= 240, `len=${s && s.reason.length}`)
+})
+
+test('isScoreAcceptable honours threshold', () => {
+  ok(isScoreAcceptable({ score: 80 }, 80) === true, 'equal is acceptable')
+  ok(isScoreAcceptable({ score: 81 }, 80) === true, 'above is acceptable')
+  ok(isScoreAcceptable({ score: 79 }, 80) === false, 'below is not acceptable')
+  ok(isScoreAcceptable(null, 80) === false, 'null rejected')
+})
+
+test('buildSteerMessage renders score, reason, and the retry position', () => {
+  const m = buildSteerMessage({ score: 42, reason: 'mentions rm -rf', attempt: 1, maxAttempts: 5 })
   ok(m.role === 'user', 'role user')
   ok(m.source && m.source.kind === 'plugin', 'source plugin')
   ok(m.source.plugin === 'dsh-answer-reviewer', 'plugin id')
-  ok(m.content[0].text.includes('challenge 1 of 3'), 'challenge position')
-  ok(m.content[0].text.includes('2 remaining'), 'remaining count')
-  ok(m.content[0].text.includes('truncated'), 'reasons listed')
+  const text = m.content[0].text
+  ok(text.includes('42/100'), 'score rendered')
+  ok(text.includes('mentions rm -rf'), 'reason listed')
+  ok(text.includes('retry 1 of 5'), 'retry position')
+  ok(text.includes('4 remaining'), 'remaining count')
 })
 
-test('buildSteerMessage shows zero remaining on the last challenge', () => {
-  const v = { verdict: 'fail', reasons: ['x'] }
-  const m = buildSteerMessage(v, 3, 3)
-  ok(m.content[0].text.includes('last one'), 'last one hint')
+test('buildSteerMessage flags the last retry with no remaining', () => {
+  const m = buildSteerMessage({ score: 20, reason: 'truncated', attempt: 5, maxAttempts: 5 })
+  ok(m.content[0].text.includes('last retry'), 'last retry hint')
 })
 
-test('createChallengeCounter bumps and clears', () => {
-  const c = createChallengeCounter(2)
-  ok(c.get('s', 1) === 0, 'starts at 0')
-  c.bump('s', 1)
-  c.bump('s', 1)
-  ok(c.get('s', 1) === 2, 'bumped twice')
-  c.bump('s', 2)
-  ok(c.get('s', 2) === 1, 'separate turn key')
-  c.bump('s', 3) // evicts oldest (s:1)
-  ok(c.size === 2, `evicted, size=${c.size}`)
-  c.clear('s', 2)
-  ok(c.get('s', 2) === 0, 'cleared one turn')
-  c.clear('s')
-  ok(c.size === 0, 'cleared all for session')
+test('buildSteerMessage tolerates missing reason', () => {
+  const m = buildSteerMessage({ score: 30, reason: '', attempt: 2, maxAttempts: 5 })
+  ok(m.content[0].text.includes('no specific defect was named'), 'fallback for empty reason')
 })
 
-test('buildReviewPrompt wraps the reply and demands JSON output', () => {
-  const p = buildReviewPrompt('Here is my answer.')
-  ok(p.system.includes('JSON'), 'system demands JSON output')
+test('buildReviewPrompt carries both user prompts and assistant reply', () => {
+  const p = buildReviewPrompt({
+    userPrompts: 'is the macOS ssh helper buggy',
+    assistantText: 'no, it works fine',
+    threshold: 80,
+  })
+  ok(p.system.includes('1-100'), 'system prompt mentions the 1-100 scale')
+  ok(p.system.includes('80'), 'system prompt echoes the threshold')
+  ok(p.system.includes('JSON'), 'system prompt demands JSON output')
   ok(p.messages.length === 1, 'one user message')
   const block = p.messages[0].content[0]
-  ok(block.type === 'text', 'text block')
-  ok(block.text.includes('<reply>'), 'wraps in <reply>')
-  ok(block.text.includes('Here is my answer.'), 'includes content')
+  ok(block.text.includes('<all_user_prompts>'), 'user prompts section')
+  ok(block.text.includes('<reply>'), 'reply section')
+  ok(block.text.includes('is the macOS ssh helper buggy'), 'user prompt carried')
+  ok(block.text.includes('no, it works fine'), 'reply carried')
   ok(p.messages[0].source.plugin === 'dsh-answer-reviewer', 'source plugin id')
+})
+
+test('buildReviewPrompt falls back when userPrompts is empty', () => {
+  const p = buildReviewPrompt({ userPrompts: '', assistantText: 'hi', threshold: 80 })
+  ok(p.messages[0].content[0].text.includes('none extracted'), 'placeholder for missing prompts')
 })
 
 test('onTurnStopping skips subagent sessions', async () => {
@@ -277,6 +353,7 @@ test('onTurnStopping fail-open on parse failure', async () => {
   let steerCalled = false
   const ctx = {
     logger: { info() {}, warn() {} },
+    // Empty stream → BlockAssembler blocks() is empty → streamToText returns '' → parseScore('') is null → fail-open.
     llm: { async *stream() { /* yields nothing */ } },
   }
   const events = [
@@ -291,11 +368,97 @@ test('onTurnStopping fail-open on parse failure', async () => {
   ok(!steerCalled, 'no steer on parse failure')
 })
 
-test('Config schema covers the same fields as resolveConfig', () => {
+test('onTurnStopping steers when score is below threshold', async () => {
+  const steers = []
+  let infoLog = ''
+  const reply = '{"score": 42, "reason": "reply is empty"}'
+  const ctx = {
+    logger: { info(m) { infoLog += String(m) + '|' }, warn() {} },
+    // BlockAssembler consumes the canonical delta protocol:
+    // block-start(index) → text-delta(index, text) → block-end(index, block).
+    llm: { async *stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: reply }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } },
+  }
+  const events = [
+    { type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'do thing' }] } }, seq: 0 },
+    { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'k' }] } }, seq: 1 },
+  ]
+  const agent = {
+    session: { id: 's1', snapshotEvents: () => events },
+    options: { provider: 'p', model: 'm' },
+    steer(m) { steers.push(m) },
+  }
+  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  ok(steers.length === 1, `steer called once, got ${steers.length}`)
+  ok(steers[0].content[0].text.includes('42/100'), 'steer text contains the score')
+  ok(steers[0].content[0].text.includes('reply is empty'), 'steer text contains the reason')
+  ok(steers[0].content[0].text.includes('retry 1 of 5'), 'steer text names the retry position')
+  ok(infoLog.includes('score=42/80'), 'info log notes score vs threshold')
+})
+
+test('onTurnStopping does not steer when score meets threshold', async () => {
+  const steers = []
+  const reply = '{"score": 92, "reason": ""}'
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    llm: { async *stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: reply }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } },
+  }
+  const events = [
+    { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'solid reply' }] } }, seq: 0 },
+  ]
+  const agent = {
+    session: { id: 's2', snapshotEvents: () => events },
+    options: { provider: 'p', model: 'm' },
+    steer(m) { steers.push(m) },
+  }
+  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  ok(steers.length === 0, 'no steer when score >= threshold')
+})
+
+test('onTurnStopping stops steering after maxChallenges', async () => {
+  const steers = []
+  const counter = createChallengeCounter()
+  counter.bump('s3', 1)
+  counter.bump('s3', 1)
+  counter.bump('s3', 1)
+  counter.bump('s3', 1)
+  counter.bump('s3', 1) // 5 already used; default cap is 5
+  const reply = '{"score": 10, "reason": "x"}'
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    llm: { async *stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: reply }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+    } },
+  }
+  const events = [
+    { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'bad reply' }] } }, seq: 0 },
+  ]
+  const agent = {
+    session: { id: 's3', snapshotEvents: () => events },
+    options: { provider: 'p', model: 'm' },
+    steer(m) { steers.push(m) },
+  }
+  await onTurnStopping(ctx, resolveConfig({}), counter, { agent, turn: 1 })
+  ok(steers.length === 0, 'cap exhausted => no further steer')
+})
+
+test('Config schema covers the same defaults as resolveConfig', () => {
   ok(typeof Config === 'function', 'Config is exported')
   const parsed = Config({})
   ok(parsed.enabled === true, 'schema default enabled')
-  ok(parsed.maxChallenges === 3, 'schema default maxChallenges')
+  ok(parsed.maxChallenges === 5, `schema default maxChallenges, got ${parsed.maxChallenges}`)
+  ok(parsed.threshold === 80, `schema default threshold, got ${parsed.threshold}`)
 })
 
 let failures = 0
