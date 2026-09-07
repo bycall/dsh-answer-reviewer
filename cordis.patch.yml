@@ -1,0 +1,8 @@
+# dsh-answer-reviewer bundle patch
+# Mount the answer-reviewer host plugin into a DSH profile. The plugin
+# listens to `agent/turn-stopping` on every agent (filtered to non-subagent
+# sessions by default) and steers the agent back into a self-fix loop when
+# the dedicated review model rejects the assistant output, capped per turn.
+- insert:
+    - id: answer-reviewer
+      name: 'dsh-answer-reviewer'
