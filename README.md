@@ -73,7 +73,10 @@ mount.
   turn, the review is cancelled mid-flight and the turn is left alone.
 - **Per-turn counter is capped.** Once a turn has been steered
   `maxChallenges` times, subsequent turn boundaries inside the same turn
-  are allowed to close without review.
+  are allowed to close without review. With the default `3` you will
+  see at most three steered re-attempts before the agent's reply goes
+  to the user as-is, even if the review model still thinks it is not
+  good enough — the cap is a hard budget, not a soft hint.
 - **The agent is told not to mention the review.** The steer message
   explicitly instructs the agent to address the findings silently.
 
