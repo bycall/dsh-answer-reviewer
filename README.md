@@ -121,4 +121,17 @@ chunks). It does not boot a dsh host.
   and the public `Config` schema.
 - `cordis.patch.yml` — cordis bundle entry that mounts the plugin.
 - `test/smoke.mjs` — node ESM smoke test (27 cases).
+- `CONFIGURE.md` — detailed configuration guide (default vs independent
+  review model, threshold tuning, fail-closed/fail-open matrix).
+- `CHANGELOG.md` — versioned release history.
+
+## Further reading
+
+- **`CONFIGURE.md`** — answers "how do I configure an independent
+  reviewer model", "how should I pick a threshold", and "what does this
+  plugin do on bad config". Read it before tuning `threshold` or wiring
+  up a second provider.
+- **`CHANGELOG.md`** — the breaking change in `0.3.0` is the
+  threshold/maxChallenges split; if you are upgrading from `0.2.x`, read
+  the migration note there.
 

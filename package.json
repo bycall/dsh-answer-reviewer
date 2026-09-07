@@ -1,7 +1,7 @@
 {
   "name": "dsh-answer-reviewer",
-  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM; on a failing verdict the plugin steers the agent with concrete feedback, up to N times per turn.",
-  "version": "0.1.0",
+  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; on a below-threshold score the plugin steers the agent with concrete feedback, up to N times per turn.",
+  "version": "0.3.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -17,6 +17,8 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "CONFIGURE.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "dsh": {
