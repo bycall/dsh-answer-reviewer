@@ -1,7 +1,7 @@
 {
   "name": "dsh-answer-reviewer",
-  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; on a below-threshold score the plugin steers the agent with concrete feedback, up to N times per turn.",
-  "version": "0.3.0",
+  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; below-threshold scores steer the agent with concrete feedback. Live config via 127.0.0.1 HTTP server, no host restart needed.",
+  "version": "0.4.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -10,6 +10,12 @@
     },
     "./review": {
       "default": "./lib/review.js"
+    },
+    "./config-store": {
+      "default": "./lib/config-store.js"
+    },
+    "./server": {
+      "default": "./lib/server.js"
     },
     "./package.json": "./package.json"
   },

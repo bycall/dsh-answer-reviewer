@@ -4,6 +4,48 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.4.0 — 2026-09-08
+
+### Added
+- **Live config via a self-hosted HTTP server on `http://127.0.0.1:3987`.**
+  Tune the gate, switch the reviewer on/off, set the max-challenges cap,
+  etc. from a browser form without restarting the host. The same JSON
+  API is reachable from `curl` for automation.
+- **ConfigStore (new `lib/config-store.js`)** — persistent, hot-reloadable
+  config layer. Reads on startup, validates partials through the same
+  `resolveConfig` path mount uses (no shape drift), persists overrides
+  atomically to `~/.dsh/answer-reviewer.json` (or `REVIEWER_CONFIG_PATH`).
+  Reset via `DELETE /api/config` removes the file so a missing file =
+  defaults.
+- **Review activity ring buffer (50 entries).** The config UI surfaces the
+  last 15 review outcomes (pass / steer / parse-fail / cap-exhausted /
+  no-text / no-route / review-error) so you can see what the gate did
+  without grepping the host log.
+- **HTTP routes**
+  - `GET /` — HTML form + recent activity table
+  - `GET /api/health` — `{ ok, at }`
+  - `GET /api/config` — `{ config, overrides, source, path }`
+  - `POST /api/config` — body: partial JSON; 200 on success, 400 on validation
+  - `DELETE /api/config` — wipe overrides; file is removed
+  - `GET /api/recent` — newest-first ring dump
+- **Env vars** — `REVIEWER_HTTP=0` disables the server; `REVIEWER_HTTP_PORT`
+  overrides the bind port; `REVIEWER_CONFIG_PATH` overrides the on-disk
+  file path.
+
+### Changed
+- `onTurnStopping(ctx, store, counter, payload)` — the second arg is now a
+  ConfigStore (was: a frozen Config). `store.get()` is the source of
+  truth for the live config so a hot-reload between turns takes effect on
+  the next turn with no restart.
+- `lib/internal.js` is the new internal barrel so `lib/index.js` and tests
+  both import from one place.
+
+### Internal
+- New files: `lib/config-store.js`, `lib/server.js`, `lib/internal.js`.
+- Smoke test extended from 27 to 39 cases; the new ones cover load /
+  update / reset / subscribe / activity / default-path / all 5 HTTP
+  routes (including bad JSON and mismatched provider/model).
+
 ## 0.3.0 — 2026-09-07
 
 ### Breaking

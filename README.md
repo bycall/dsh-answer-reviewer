@@ -9,6 +9,13 @@ concrete feedback. Once a turn has been steered `maxChallenges` times
 (default `5`), the agent's reply is allowed to close the turn as-is — the
 cap is a leak guard, not the real gate; the score threshold is.
 
+Tune the gate, switch the reviewer on/off, change the max-challenges cap,
+or pick a dedicated review model — all live, no host restart — through a
+self-hosted config UI on **`http://127.0.0.1:3987`** (or via the same
+JSON API from `curl`). The on-disk config lives at
+`~/.dsh/answer-reviewer.json` (override with `REVIEWER_CONFIG_PATH`);
+turns of the host go through with the defaults if the file is absent.
+
 The review model sees **every real user prompt** the user has issued in
 the session (any `user/message` event whose `source.kind` is not
 `'plugin'`), tagged `<all_user_prompts>`, plus the assistant's final
@@ -31,6 +38,39 @@ the agent is explicitly told not to mention the review to the user. A
 different provider/model reduces the chance that a self-graded check
 rubber-stamps its own work, and the explicit numerical gate means a
 well-tuned model that returns 80+ will not trigger any re-attempt.
+
+## Live config (since 0.4.0)
+
+The plugin starts a tiny `node:http` server bound to `127.0.0.1:3987`
+(no external access). Open it in a browser to see the form, the on-disk
+config path, and a rolling list of the last 15 review outcomes. The same
+JSON API is reachable from the shell:
+
+```bash
+# Read current effective config + overrides + file path
+curl -s http://127.0.0.1:3987/api/config
+
+# Tweak the threshold (only the fields you POST are written)
+curl -s -X POST http://127.0.0.1:3987/api/config \
+  -H 'content-type: application/json' \
+  -d '{"threshold": 90}'
+
+# Disable the reviewer
+curl -s -X POST http://127.0.0.1:3987/api/config \
+  -H 'content-type: application/json' \
+  -d '{"enabled": false}'
+
+# Wipe overrides back to defaults (also removes the on-disk file)
+curl -s -X DELETE http://127.0.0.1:3987/api/config
+
+# See the last 20 review outcomes
+curl -s http://127.0.0.1:3987/api/recent
+```
+
+Disable the server with `REVIEWER_HTTP=0`. Change the port with
+`REVIEWER_HTTP_PORT=<n>`. Move the on-disk file with
+`REVIEWER_CONFIG_PATH=<abs path>`. The next turn picks up the new value
+with no host restart.
 
 ## Install
 
@@ -114,13 +154,19 @@ chunks). It does not boot a dsh host.
 ## Files
 
 - `lib/index.js` — cordis `apply`, wires the listener and orchestrates the
-  review call.
+  review call. Imports from `./internal.js`.
+- `lib/internal.js` — barrel re-export so `lib/index.js` and tests import
+  from one place.
 - `lib/review.js` — pure helpers: `resolveConfig`, `extractAssistantText`,
   `extractUserPrompts`, `buildReviewPrompt`, `parseScore`,
   `isScoreAcceptable`, `buildSteerMessage`, `createChallengeCounter`,
-  and the public `Config` schema.
+  and the public `Config` zod schema.
+- `lib/config-store.js` — `createConfigStore` (persistent, hot-reloadable),
+  `defaultConfigPath`, env-var constants for the HTTP server.
+- `lib/server.js` — `startServer(store, opts)` — the 127.0.0.1-only
+  `node:http` instance (HTML form + JSON API).
 - `cordis.patch.yml` — cordis bundle entry that mounts the plugin.
-- `test/smoke.mjs` — node ESM smoke test (27 cases).
+- `test/smoke.mjs` — node ESM smoke test (39 cases).
 - `CONFIGURE.md` — detailed configuration guide (default vs independent
   review model, threshold tuning, fail-closed/fail-open matrix).
 - `CHANGELOG.md` — versioned release history.
