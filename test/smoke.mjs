@@ -12,7 +12,8 @@
  * Exit code 0 = all green.
  */
 
-import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -74,6 +75,9 @@ const {
   buildReviewPrompt,
   buildSteerMessage,
   createChallengeCounter,
+  createConfigStore,
+  defaultConfigPath,
+  DEFAULT_HTTP_PORT,
   extractAssistantText,
   extractUserPrompts,
   isScoreAcceptable,
@@ -81,11 +85,24 @@ const {
   onTurnStopping,
   parseScore,
   resolveConfig,
+  startServer,
 } = plugin
 
 const tests = []
 const test = (label, fn) => tests.push({ label, fn })
 const ok = (cond, message) => { if (!cond) throw new Error(`assertion failed: ${message}`) }
+
+/** Build a fresh ConfigStore backed by a tmp file the test can write into
+ *  without leaking into the user's real config. Caller is expected to
+ *  delete the tmp dir if needed; the OS reaps `/tmp` on reboot anyway. */
+async function makeTestStore(overrides = {}) {
+  const dir = mkdtempSync(resolve(tmpdir(), 'dsh-reviewer-'))
+  const filePath = resolve(dir, 'config.json')
+  const defaults = resolveConfig(overrides)
+  const store = await createConfigStore({ defaults, filePath, logger: { info() {}, warn() {} } })
+  await store.load()
+  return { store, dir, filePath, defaults, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
 
 test('name exports the right plugin id', () => {
   ok(name === 'dsh-answer-reviewer', `name=${name}`)
@@ -310,7 +327,10 @@ test('onTurnStopping skips subagent sessions', async () => {
     options: { provider: 'p', model: 'm' },
     steer() { steerCalled = true },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(!steerCalled, 'subagent was skipped')
 })
 
@@ -325,7 +345,10 @@ test('onTurnStopping skips turns with no assistant text', async () => {
     options: { provider: 'p', model: 'm' },
     steer() { steerCalled = true },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(!steerCalled, 'no text => no review => no steer')
 })
 
@@ -344,7 +367,10 @@ test('onTurnStopping fail-open when review call throws', async () => {
     options: { provider: 'p', model: 'm' },
     steer() { steerCalled = true },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(!steerCalled, 'no steer on review failure')
   ok(warned.includes('review call failed'), `expected fail-open warn, got: ${warned}`)
 })
@@ -364,7 +390,10 @@ test('onTurnStopping fail-open on parse failure', async () => {
     options: { provider: 'p', model: 'm' },
     steer() { steerCalled = true },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(!steerCalled, 'no steer on parse failure')
 })
 
@@ -392,7 +421,10 @@ test('onTurnStopping steers when score is below threshold', async () => {
     options: { provider: 'p', model: 'm' },
     steer(m) { steers.push(m) },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(steers.length === 1, `steer called once, got ${steers.length}`)
   ok(steers[0].content[0].text.includes('42/100'), 'steer text contains the score')
   ok(steers[0].content[0].text.includes('reply is empty'), 'steer text contains the reason')
@@ -420,7 +452,10 @@ test('onTurnStopping does not steer when score meets threshold', async () => {
     options: { provider: 'p', model: 'm' },
     steer(m) { steers.push(m) },
   }
-  await onTurnStopping(ctx, resolveConfig({}), createChallengeCounter(), { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
+  } finally { cleanup() }
   ok(steers.length === 0, 'no steer when score >= threshold')
 })
 
@@ -449,7 +484,10 @@ test('onTurnStopping stops steering after maxChallenges', async () => {
     options: { provider: 'p', model: 'm' },
     steer(m) { steers.push(m) },
   }
-  await onTurnStopping(ctx, resolveConfig({}), counter, { agent, turn: 1 })
+  const { store, cleanup } = await makeTestStore()
+  try {
+    await onTurnStopping(ctx, store, counter, { agent, turn: 1 })
+  } finally { cleanup() }
   ok(steers.length === 0, 'cap exhausted => no further steer')
 })
 
@@ -459,6 +497,167 @@ test('Config schema covers the same defaults as resolveConfig', () => {
   ok(parsed.enabled === true, 'schema default enabled')
   ok(parsed.maxChallenges === 5, `schema default maxChallenges, got ${parsed.maxChallenges}`)
   ok(parsed.threshold === 80, `schema default threshold, got ${parsed.threshold}`)
+})
+
+// --- ConfigStore -----------------------------------------------------------
+
+test('ConfigStore loads defaults when no file exists', async () => {
+  const { store, filePath, cleanup } = await makeTestStore()
+  try {
+    ok(store.get().threshold === 80, 'effective config starts at defaults')
+    ok(store.getSource() === 'defaults', 'source reports defaults')
+    ok(store.getPath() === filePath, 'path returned matches input')
+  } finally { cleanup() }
+})
+
+test('ConfigStore.update persists and applies the partial', async () => {
+  const { store, filePath, cleanup } = await makeTestStore()
+  try {
+    const result = await store.update({ threshold: 90, enabled: false })
+    ok(!result.error, `update returned: ${JSON.stringify(result)}`)
+    ok(store.get().threshold === 90, 'effective threshold updated')
+    ok(store.get().enabled === false, 'enabled flag updated')
+    ok(store.getSource() === 'file', 'source reports file after update')
+    // Re-load in a fresh store to confirm disk persistence.
+    const reopened = await createConfigStore({ defaults: resolveConfig({}), filePath, logger: { info() {}, warn() {} } })
+    await reopened.load()
+    ok(reopened.get().threshold === 90, 'on-disk threshold survives reopen')
+  } finally { cleanup() }
+})
+
+test('ConfigStore.update rejects invalid provider/model pair', async () => {
+  const { store, cleanup } = await makeTestStore()
+  try {
+    const r = await store.update({ reviewProvider: 'openai' })
+    ok(r.error && r.error.includes('must be set together'), `error: ${r.error}`)
+    // State must not have changed.
+    ok(store.get().reviewProvider === undefined, 'reviewProvider still undefined')
+  } finally { cleanup() }
+})
+
+test('ConfigStore.subscribe fires on every successful update', async () => {
+  const { store, cleanup } = await makeTestStore()
+  try {
+    const seen = []
+    store.subscribe((cfg) => seen.push(cfg.threshold))
+    await store.update({ threshold: 70 })
+    await store.update({ threshold: 75 })
+    ok(seen.length === 2 && seen[0] === 70 && seen[1] === 75, `thresholds observed: ${seen.join(',')}`)
+  } finally { cleanup() }
+})
+
+test('ConfigStore.reset removes the on-disk file', async () => {
+  const { store, filePath, cleanup } = await makeTestStore()
+  try {
+    await store.update({ threshold: 33 })
+    ok(existsSync(filePath), 'file exists after update')
+    await store.reset()
+    ok(!existsSync(filePath), 'file removed after reset')
+    ok(store.get().threshold === 80, 'config back to defaults after reset')
+    ok(store.getSource() === 'defaults', 'source reports defaults after reset')
+  } finally { cleanup() }
+})
+
+test('ConfigStore.recordActivity keeps a ring buffer', async () => {
+  const { store, cleanup } = await makeTestStore()
+  try {
+    for (let i = 0; i < 60; i += 1) store.recordActivity({ sessionId: 'x', turn: i, decision: 'pass' })
+    const recent = store.getRecent()
+    ok(recent.length === 50, `ring capped at 50, got ${recent.length}`)
+    // The array grows by `push` and ages by `shift`, so the OLDEST survivor
+    // sits at index 0 and the NEWEST at the end.
+    ok(recent[0].turn === 10, `oldest is the 11th push (turn=10), got ${recent[0].turn}`)
+    ok(recent[recent.length - 1].turn === 59, `newest is the 60th push (turn=59), got ${recent[recent.length - 1].turn}`)
+  } finally { cleanup() }
+})
+
+test('defaultConfigPath honours REVIEWER_CONFIG_PATH', () => {
+  const p = defaultConfigPath({ REVIEWER_CONFIG_PATH: '/tmp/x.json', HOME: '/home/me' })
+  ok(p === '/tmp/x.json', `env override honoured, got ${p}`)
+})
+
+// --- HTTP server -----------------------------------------------------------
+
+test('startServer binds, serves /api/health, and exposes its port', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    ok(typeof handle.port === 'number' && handle.port > 0, `bound port=${handle.port}`)
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/health`)
+    ok(res.status === 200, `health status=${res.status}`)
+    const json = await res.json()
+    ok(json.ok === true, 'health body says ok')
+  } finally { handle?.close(); cleanup() }
+})
+
+test('startServer exposes /api/config GET and POST', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    const url = `http://127.0.0.1:${handle.port}/api/config`
+    const before = await fetch(url).then((r) => r.json())
+    ok(before.config.threshold === 80, 'initial threshold 80')
+    const post = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ threshold: 95, maxChallenges: 3 }),
+    })
+    ok(post.status === 200, `post status=${post.status}`)
+    const after = await fetch(url).then((r) => r.json())
+    ok(after.config.threshold === 95, 'threshold updated to 95')
+    ok(after.config.maxChallenges === 3, 'maxChallenges updated to 3')
+  } finally { handle?.close(); cleanup() }
+})
+
+test('startServer POST rejects bad JSON bodies', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    const url = `http://127.0.0.1:${handle.port}/api/config`
+    const bad = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{not json',
+    })
+    ok(bad.status === 400, `bad body status=${bad.status}`)
+  } finally { handle?.close(); cleanup() }
+})
+
+test('startServer POST rejects mismatched provider/model', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    const url = `http://127.0.0.1:${handle.port}/api/config`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reviewProvider: 'openai' }),
+    })
+    ok(res.status === 400, `mismatched provider status=${res.status}`)
+    const body = await res.json()
+    ok(body.error && body.error.includes('must be set together'), `error: ${body.error}`)
+  } finally { handle?.close(); cleanup() }
+})
+
+test('startServer DELETE wipes overrides back to defaults', async () => {
+  const { store, filePath, cleanup } = await makeTestStore()
+  let handle
+  try {
+    await store.update({ threshold: 77 })
+    ok(existsSync(filePath), 'file present after update')
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    const url = `http://127.0.0.1:${handle.port}/api/config`
+    const res = await fetch(url, { method: 'DELETE' })
+    ok(res.status === 200, `delete status=${res.status}`)
+    ok(!existsSync(filePath), 'file removed after DELETE')
+    const after = await fetch(url).then((r) => r.json())
+    ok(after.config.threshold === 80, 'threshold back to default')
+    ok(after.source === 'defaults', 'source reports defaults after DELETE')
+  } finally { handle?.close(); cleanup() }
 })
 
 let failures = 0
