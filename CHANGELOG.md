@@ -4,6 +4,34 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.5.1 — 2026-09-08
+
+### Fixed
+- **Activity timestamps rendered 8 hours behind on GMT+8 hosts.** Times are
+  stored in UTC (`new Date().toISOString()`), but the "最近 15 条审查活动"
+  table sliced the raw ISO string (`slice(11, 19)`) and showed the UTC
+  wall-clock. Introduced `fmtLocalTime()` — the table now renders the
+  host's local timezone (`HH:MM:SS`), e.g. a `12:26:19Z` event shows as
+  `20:26:19` in GMT+8.
+- **Clean passes were misrecorded as `parse-fail`.** `parseScore` rejected
+  any reply with an empty `reason`, but the review prompt explicitly lets
+  the model leave `reason` empty when the score clears the threshold — so
+  a pass on a good answer was classified as `parse-fail` (score `—`). The
+  parser is now threshold-aware: an empty reason is accepted when
+  `score >= threshold` (pass needs no feedback) and still fails closed
+  below the gate, where concrete feedback is mandatory. `parseScore` keeps
+  its strict contract when no threshold is passed.
+- **`parse-fail` rows now carry a diagnostic snippet.** The recorded entry
+  includes the first 120 chars of the unparseable reply, so future
+  parse failures are debuggable from the activity table instead of being
+  an opaque `—`.
+
+### Notes
+- Test count 41 → 45: empty-reason pass/reject/no-threshold cases, a local
+  time formatting regression guard, and the "does not steer on pass" case
+  now also asserts the activity is a real `pass` (it previously passed for
+  the wrong reason — the reply was being rejected, not accepted).
+
 ## 0.5.0 — 2026-09-08
 
 ### Added

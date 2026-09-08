@@ -1,7 +1,7 @@
 {
   "name": "dsh-answer-reviewer",
   "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; below-threshold scores steer the agent with concrete feedback. Live config via 127.0.0.1 HTTP server, no host restart needed. Also exposed as a right-sidebar tab through dsh-better-sidebar.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bycall/dsh-answer-reviewer.git"

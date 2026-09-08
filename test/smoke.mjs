@@ -87,6 +87,7 @@ const {
   parseScore,
   resolveConfig,
   startServer,
+  fmtLocalTime,
 } = plugin
 
 const tests = []
@@ -257,6 +258,46 @@ test('parseScore fails closed on garbage', () => {
   ok(parseScore('') === null, 'empty rejected')
   ok(parseScore('{}') === null, 'no score rejected')
   ok(parseScore('{"score": 50}') === null, 'missing reason rejected')
+})
+
+test('parseScore accepts an empty reason on a pass at/above threshold', () => {
+  // The review prompt tells the model to leave `reason` empty when the
+  // answer clears the gate; rejecting that used to misclassify clean
+  // passes as parse failures. Regression for the 0.5.1 fix.
+  const pass = parseScore('{"score": 90, "reason": ""}', 80)
+  ok(pass !== null, 'empty reason accepted when score >= threshold')
+  ok(pass.score === 90 && pass.reason === '', `got ${JSON.stringify(pass)}`)
+  const exactly = parseScore('{"score": 80, "reason": ""}', 80)
+  ok(exactly !== null, 'score equal to threshold still a pass')
+})
+
+test('parseScore still fails closed on an empty reason below threshold', () => {
+  // Below the gate the agent needs concrete feedback; an empty reason is
+  // indistinguishable from "no feedback", so it must keep failing closed.
+  ok(parseScore('{"score": 79, "reason": ""}', 80) === null, 'below threshold rejects')
+  ok(parseScore('{"score": 70, "reason": "  "}', 80) === null, 'whitespace-only reason rejects')
+})
+
+test('parseScore keeps strict behaviour when no threshold is supplied', () => {
+  // Older callers without a threshold cannot classify pass vs fail, so the
+  // fail-closed contract for missing reasons is preserved.
+  ok(parseScore('{"score": 90, "reason": ""}') === null, 'no threshold => empty reason rejects')
+})
+
+test('fmtLocalTime renders stored UTC activity times as local wall-clock', () => {
+  const iso = '2026-09-08T12:26:19.331Z'
+  const expected = (() => {
+    const d = new Date(iso)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  })()
+  const got = fmtLocalTime(iso)
+  ok(got === expected, `fmtLocalTime('${iso}') = '${got}', expected local '${expected}'`)
+  // Regression guard: a naive `iso.slice(11, 19)` returns the UTC "12:26:19"
+  // part. On any host east of Greenwich (e.g. GMT+8) that is 8h stale.
+  ok(got !== iso.slice(11, 19), 'must not echo the raw UTC slice')
+  ok(fmtLocalTime('') === '', 'empty input stays empty')
+  ok(fmtLocalTime('not-a-date') === 'not-a-date', 'unparseable input passes through')
 })
 
 test('parseScore handles reason longer than 240 chars', () => {
@@ -458,6 +499,12 @@ test('onTurnStopping does not steer when score meets threshold', async () => {
     await onTurnStopping(ctx, store, createChallengeCounter(), { agent, turn: 1 })
   } finally { cleanup() }
   ok(steers.length === 0, 'no steer when score >= threshold')
+  // Regression guard (0.5.1): the mock reply has an empty reason because a
+  // pass does not need one. It must be recorded as a real `pass`, NOT
+  // misclassified as `parse-fail` the way empty-reason replies were before.
+  const latest = store.getRecent().slice(-1)[0]
+  ok(latest && latest.decision === 'pass', `recorded pass, got ${latest && latest.decision}`)
+  ok(latest && latest.score === 92, `recorded score 92, got ${latest && latest.score}`)
 })
 
 test('onTurnStopping stops steering after maxChallenges', async () => {
