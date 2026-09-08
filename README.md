@@ -72,6 +72,22 @@ Disable the server with `REVIEWER_HTTP=0`. Change the port with
 `REVIEWER_CONFIG_PATH=<abs path>`. The next turn picks up the new value
 with no host restart.
 
+## Side card (since 0.5.0)
+
+If the host profile also installs
+[`dsh-better-sidebar`](https://dshfind.com/en/plugins/omdsh-dev/DSH-better-sidebar),
+the plugin also registers a right-sidebar tab titled **"Reviewer 配置"**.
+Open it from the sidebar's `+` menu (next to Files / Terminal / Browser).
+The tab content is the same form as the standalone server, loaded
+inside an iframe — saving a value through the tab is observable to the
+standalone server (and vice versa) on the very next GET. When the tab
+is not active the iframe unmounts so background tabs do not keep
+polling.
+
+If `dsh-better-sidebar` is not installed, the side card is hidden and
+the standalone `127.0.0.1:3987` page is the only surface. Both are
+optional and the plugin works with neither installed.
+
 ## Install
 
 Add the package to your profile's `dependencies` and to
@@ -165,6 +181,9 @@ chunks). It does not boot a dsh host.
   `defaultConfigPath`, env-var constants for the HTTP server.
 - `lib/server.js` — `startServer(store, opts)` — the 127.0.0.1-only
   `node:http` instance (HTML form + JSON API).
+- `lib/client.js` — `window.__ModuleLoader__.load` client bundle. When
+  the host profile includes `dsh-better-sidebar`, registers a
+  "Reviewer 配置" side card; otherwise it is silently skipped.
 - `cordis.patch.yml` — cordis bundle entry that mounts the plugin.
 - `test/smoke.mjs` — node ESM smoke test (39 cases).
 - `CONFIGURE.md` — detailed configuration guide (default vs independent

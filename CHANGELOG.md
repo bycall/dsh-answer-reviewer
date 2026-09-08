@@ -4,6 +4,36 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.5.0 — 2026-09-08
+
+### Added
+- **Native right-sidebar tab in dsh-better-sidebar.** The config panel is
+  now exposed as a host-native side card under the title "Reviewer
+  配置" — click the sidebar's `+` menu, pick the entry, and the form
+  mounts in the right column next to Files / Terminal / Browser.
+- **`lib/client.js`** — new client bundle. Uses the standard
+  `window.__ModuleLoader__.load({ id, factory })` contract. The
+  component is a small header strip plus a flex iframe pointing at the
+  same `http://127.0.0.1:3987/` endpoint the standalone server
+  serves — no second source of truth, no React form logic. When the
+  tab is not active the iframe unmounts (live views pause).
+- **`dsh.client` declaration in `package.json`** — `inject: ['betterSidebar']`
+  so the host guarantees `ctx.betterSidebar` is live when our `apply`
+  runs.
+- **Smoke coverage for the client bundle** — `vm.createContext` + a
+  mini-React `createElement` mock exercises the full `apply` path:
+  effect fires, `registerTab` is called with the expected descriptor,
+  the rendered tree contains the iframe with the local server's URL,
+  `exports.apply` and `exports.inject = ['betterSidebar']` are
+  exposed. (2 new cases, 41 total.)
+
+### Changed
+- `package.json`:
+  - `version` 0.4.0 → 0.5.0
+  - new export `.`/`./client`
+  - new `dsh.client` block alongside the existing `dsh.bundle`
+  - `description` mentions the side card
+
 ## 0.4.0 — 2026-09-08
 
 ### Added
