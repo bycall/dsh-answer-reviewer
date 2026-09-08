@@ -12,11 +12,12 @@
  * Exit code 0 = all green.
  */
 
-import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
 const here = dirname(fileURLToPath(import.meta.url))
@@ -658,6 +659,101 @@ test('startServer DELETE wipes overrides back to defaults', async () => {
     ok(after.config.threshold === 80, 'threshold back to default')
     ok(after.source === 'defaults', 'source reports defaults after DELETE')
   } finally { handle?.close(); cleanup() }
+})
+
+// --- Client bundle ----------------------------------------------------------
+// The client bundle is a self-executing script that calls
+// `window.__ModuleLoader__.load({ id, factory })`. We don't boot a browser
+// here; we set up a stub window + react + betterSidebar service and verify
+// the factory wires up correctly (apply() exists, registerTab called with
+// the expected descriptor, the rendered component mounts an iframe).
+
+test('client bundle loads, registers the tab, and renders an iframe', () => {
+  const registered = []
+  // Capture every effect-callback so we can drive them deterministically.
+  const effects = []
+  // Mini-React createElement: if the type is a function, call it with
+  // (props, ...children) and return its result; otherwise return a plain
+  // element tree. This lets the test drive the component without a real
+  // reconciler.
+  const createElement = function (type, props, ...children) {
+    if (typeof type === 'function') {
+      return type(Object.assign({}, props || {}), ...children)
+    }
+    return { type, props: props || {}, children: children.length === 1 ? children[0] : children }
+  }
+  const useState = (initial) => [initial, () => {}]
+  const useEffect = () => {}
+  const reactStub = { createElement, useState, useEffect, default: { createElement, useState, useEffect } }
+  let exportsObj = null
+  const moduleLoader = { load(opts) {
+    if (!opts || typeof opts.factory !== 'function') throw new Error('load called with no factory')
+    exportsObj = opts.factory((id) => id === 'react' ? reactStub : null)
+  } }
+  const sandbox = { window: { __ModuleLoader__: moduleLoader } }
+  vm.createContext(sandbox)
+  const code = readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8')
+  vm.runInContext(code, sandbox, { filename: 'lib/client.js' })
+  ok(exportsObj, 'factory returned an exports object')
+  ok(typeof exportsObj.apply === 'function', 'exports.apply is a function')
+
+  // The host's client-loader would call apply(ctx) now. We do the same
+  // here, with a stub ctx whose `effect` records its callback and whose
+  // `betterSidebar.registerTab` records its descriptor.
+  const ctx = {
+    effect(fn) { effects.push(fn); return () => {} },
+    betterSidebar: { registerTab(desc) { registered.push(desc); return () => {} } },
+  }
+  exportsObj.apply(ctx)
+  ok(effects.length === 1, `apply() registered one effect, got ${effects.length}`)
+  // Drive the effect — that is where registerTab lives.
+  effects[0]()
+  ok(registered.length === 1, `one tab registered, got ${registered.length}`)
+  const desc = registered[0]
+  ok(desc.id === 'dsh-answer-reviewer:config', `tab id=${desc.id}`)
+  ok(desc.title === 'Reviewer 配置', `tab title=${desc.title}`)
+  ok(desc.single === true, 'tab marked single-instance')
+  ok(typeof desc.component === 'function', 'tab has a component function')
+
+  // Render the component. With the mini-React createElement above,
+  // `desc.component(props)` resolves the wrapper element by calling
+  // ReviewerConfigTab(props), so the tree we get back is the actual
+  // rendered root.
+  const tree = desc.component({ visible: true })
+  if (!tree || tree.type !== 'div') console.error('DEBUG tree:', JSON.stringify(tree, null, 2))
+  ok(tree && tree.type === 'div', 'root is a div')
+  function findIframe(node) {
+    if (!node || typeof node !== 'object') return null
+    if (node.type === 'iframe') return node
+    const kids = node.children
+    if (Array.isArray(kids)) {
+      for (const k of kids) { const f = findIframe(k); if (f) return f }
+    } else if (kids && typeof kids === 'object') {
+      const f = findIframe(kids); if (f) return f
+    }
+    return null
+  }
+  const iframe = findIframe(tree)
+  ok(iframe, 'tree contains an iframe')
+  ok(iframe && iframe.props && iframe.props.src === 'http://127.0.0.1:3987/', `iframe src=${iframe && iframe.props.src}`)
+})
+
+test('client bundle exports apply + inject=["betterSidebar"]', () => {
+  const captured = {}
+  const moduleLoader = { load(opts) {
+    captured.exports = opts.factory((id) => id === 'react' ? { createElement(){}, default:{createElement(){}} } : null)
+  } }
+  const ctx = {
+    effect() {},
+    betterSidebar: { registerTab() {} },
+  }
+  const sandbox = { window: { __ModuleLoader__: moduleLoader } }
+  vm.createContext(sandbox)
+  const code = readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8')
+  vm.runInContext(code, sandbox, { filename: 'lib/client.js' })
+  ok(typeof captured.exports.apply === 'function', 'exports.apply is a function')
+  ok(Array.isArray(captured.exports.inject), 'exports.inject is an array')
+  ok(captured.exports.inject[0] === 'betterSidebar', `first inject is betterSidebar, got ${captured.exports.inject[0]}`)
 })
 
 let failures = 0
