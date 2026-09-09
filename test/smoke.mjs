@@ -659,6 +659,25 @@ test('startServer exposes /api/config GET and POST', async () => {
   } finally { handle?.close(); cleanup() }
 })
 
+test('startServer serves the config page with recent-activity auto-refresh', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    const res = await fetch(`http://127.0.0.1:${handle.port}/`)
+    ok(res.status === 200, `page status=${res.status}`)
+    const html = await res.text()
+    ok(html.includes('最近 15 条审查活动'), 'activity table section present')
+    // 0.5.2: the activity list must refresh itself by polling /api/recent —
+    // the client side has its own row renderer + local-time formatter.
+    ok(html.includes('id="recent"'), 'client-rendered recent container present')
+    ok(html.includes('refreshRecent'), 'auto-refresh poller present')
+    ok(html.includes('/api/recent'), 'poller targets the recent API')
+    ok(html.includes('RECENT_POLL_MS'), 'poll interval declared')
+    ok(html.includes('fmtLocal('), 'client-side local-time formatting present')
+  } finally { handle?.close(); cleanup() }
+})
+
 test('startServer POST rejects bad JSON bodies', async () => {
   const { store, cleanup } = await makeTestStore()
   let handle

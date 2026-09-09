@@ -4,6 +4,24 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.5.2 — 2026-09-09
+
+### Added
+- **The recent-activity list now refreshes itself.** The "最近 15 条审查
+  活动" table polls `/api/recent` every 3 seconds and swaps only the table
+  DOM — no more manual 「重新加载」 clicks, and unsaved config edits in the
+  form above are never disturbed (a full `location.reload()` used to be
+  required to see a new review). The poll fires immediately again when the
+  tab/iframe regains visibility or the window refocuses, and a short fade
+  animation highlights newly landed rows.
+- The table is rendered client-side now; session ids are shown as the first
+  8 chars of the uuid tail (e.g. `b6d12535`) instead of the ambiguous
+  `session-` prefix.
+
+### Notes
+- Test count 45 → 46: a `GET /` page test asserting the poller, the client
+  row renderer, and its local-time formatter are present.
+
 ## 0.5.1 — 2026-09-08
 
 ### Fixed
