@@ -764,13 +764,27 @@ test('client bundle loads, registers the tab, and renders an iframe', () => {
   ok(typeof exportsObj.apply === 'function', 'exports.apply is a function')
 
   // The host's client-loader would call apply(ctx) now. We do the same
-  // here, with a stub ctx whose `effect` records its callback and whose
+  // here, with a stub ctx whose `effect` records its callback, whose
+  // `inject` reports the lazily-waited services and drives its callback
+  // (as cordis does once the service is available), and whose
   // `betterSidebar.registerTab` records its descriptor.
+  const injectCalls = []
   const ctx = {
     effect(fn) { effects.push(fn); return () => {} },
+    inject(deps, cb) { injectCalls.push(deps); cb(ctx) },
     betterSidebar: { registerTab(desc) { registered.push(desc); return () => {} } },
   }
   exportsObj.apply(ctx)
+  // betterSidebar must be waited for lazily (`ctx.inject`), not declared as
+  // a hard `exports.inject` dependency: a hard dependency leaves the entry
+  // "pending (waiting for service: betterSidebar)" and paints a
+  // "Failed to load plugins" banner on the host main page whenever
+  // dsh-better-sidebar is absent.
+  ok(injectCalls.length === 1, `apply() waited for deps once, got ${injectCalls.length}`)
+  ok(
+    injectCalls[0].length === 1 && injectCalls[0][0] === 'betterSidebar',
+    `lazy inject deps=${JSON.stringify(injectCalls[0])}`
+  )
   ok(effects.length === 1, `apply() registered one effect, got ${effects.length}`)
   // Drive the effect — that is where registerTab lives.
   effects[0]()
@@ -804,13 +818,14 @@ test('client bundle loads, registers the tab, and renders an iframe', () => {
   ok(iframe && iframe.props && iframe.props.src === 'http://127.0.0.1:3987/', `iframe src=${iframe && iframe.props.src}`)
 })
 
-test('client bundle exports apply + inject=["betterSidebar"]', () => {
+test('client bundle does not hard-depend on betterSidebar', () => {
   const captured = {}
   const moduleLoader = { load(opts) {
     captured.exports = opts.factory((id) => id === 'react' ? { createElement(){}, default:{createElement(){}} } : null)
   } }
   const ctx = {
     effect() {},
+    inject() {},
     betterSidebar: { registerTab() {} },
   }
   const sandbox = { window: { __ModuleLoader__: moduleLoader } }
@@ -819,7 +834,60 @@ test('client bundle exports apply + inject=["betterSidebar"]', () => {
   vm.runInContext(code, sandbox, { filename: 'lib/client.js' })
   ok(typeof captured.exports.apply === 'function', 'exports.apply is a function')
   ok(Array.isArray(captured.exports.inject), 'exports.inject is an array')
-  ok(captured.exports.inject[0] === 'betterSidebar', `first inject is betterSidebar, got ${captured.exports.inject[0]}`)
+  ok(
+    captured.exports.inject.length === 0,
+    `exports.inject declares nothing, got ${JSON.stringify(captured.exports.inject)}`
+  )
+  ok(
+    !captured.exports.inject.includes('betterSidebar'),
+    'betterSidebar is not a hard inject — a hard inject stalls the entry with ' +
+      '"pending (waiting for service: betterSidebar)" when dsh-better-sidebar is absent'
+  )
+})
+
+// Regression: with dsh-better-sidebar absent, cordis never fires the
+// `ctx.inject` callback, but the ENTRY still activates. apply() must
+// therefore neither throw nor touch `ctx.betterSidebar` on that path —
+// otherwise the host main page breaks instead of merely losing one tab.
+test('apply() survives a host without betterSidebar', () => {
+  const captured = {}
+  const moduleLoader = { load(opts) {
+    captured.exports = opts.factory((id) => id === 'react' ? { createElement(){}, default:{createElement(){}} } : null)
+  } }
+  const sandbox = { window: { __ModuleLoader__: moduleLoader } }
+  vm.createContext(sandbox)
+  vm.runInContext(readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8'), sandbox, { filename: 'lib/client.js' })
+
+  let lazyDeps = null
+  const ctx = {
+    // Reached only if apply() eagerly registers — i.e. only if the lazy
+    // inject was replaced by a direct ctx.betterSidebar access.
+    effect() { throw new Error('apply() must not register eagerly without betterSidebar') },
+    inject(deps, cb) {
+      lazyDeps = deps
+      // Cordis leaves the child fiber pending: the callback is simply never
+      // called. Deliberately do NOT invoke cb.
+      void cb
+    },
+  }
+  captured.exports.apply(ctx) // must not throw
+  ok(lazyDeps !== null, 'apply() went through the lazy ctx.inject path')
+  ok(lazyDeps.length === 1 && lazyDeps[0] === 'betterSidebar', `lazy deps=${JSON.stringify(lazyDeps)}`)
+})
+
+// The manifest's dsh.client.inject carries PACKAGE-ROW names (as every
+// official bundle does), not cordis service names. `betterSidebar` is a
+// service, so listing it there was meaningless; it must not come back.
+test('package.json dsh.client.inject declares no service name', () => {
+  const pkg = JSON.parse(readFileSync(resolve(pkgRoot, 'package.json'), 'utf8'))
+  ok(pkg.dsh && pkg.dsh.client, 'package.json declares dsh.client')
+  ok(Array.isArray(pkg.dsh.client.inject), 'dsh.client.inject is an array')
+  for (const name of pkg.dsh.client.inject) {
+    ok(
+      !['betterSidebar', 'slots', 'sessions', 'locale'].includes(name),
+      `dsh.client.inject must list package rows, not the service "${name}"`
+    )
+  }
 })
 
 let failures = 0

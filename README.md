@@ -88,6 +88,15 @@ If `dsh-better-sidebar` is not installed, the side card is hidden and
 the standalone `127.0.0.1:3987` page is the only surface. Both are
 optional and the plugin works with neither installed.
 
+The better-sidebar dependency is **soft, by design**: the tab is waited for
+lazily (`ctx.inject(["betterSidebar"], …)`) rather than declared in
+`exports.inject`. A hard inject would leave the client entry
+`pending (waiting for service: betterSidebar)` on any host without
+dsh-better-sidebar, which the web boot audit reports as
+`web boot: 1 entry did not activate` and the shell renders as a
+**"Failed to load plugins"** banner over the whole main page. See the 0.5.3
+changelog entry.
+
 ## Install
 
 Add the package to your profile's `dependencies` and to
@@ -183,9 +192,10 @@ chunks). It does not boot a dsh host.
   `node:http` instance (HTML form + JSON API).
 - `lib/client.js` — `window.__ModuleLoader__.load` client bundle. When
   the host profile includes `dsh-better-sidebar`, registers a
-  "Reviewer 配置" side card; otherwise it is silently skipped.
+  "Reviewer 配置" side card; otherwise the entry still activates and the
+  card is simply never registered.
 - `cordis.patch.yml` — cordis bundle entry that mounts the plugin.
-- `test/smoke.mjs` — node ESM smoke test (39 cases).
+- `test/smoke.mjs` — node ESM smoke test (48 cases).
 - `CONFIGURE.md` — detailed configuration guide (default vs independent
   review model, threshold tuning, fail-closed/fail-open matrix).
 - `CHANGELOG.md` — versioned release history.

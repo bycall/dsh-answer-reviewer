@@ -4,6 +4,40 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.5.3 — 2026-09-10
+
+### Fixed
+- **A host without dsh-better-sidebar no longer shows a "Failed to load
+  plugins" banner.** The client entry declared `exports.inject =
+  ["betterSidebar"]`, a *hard* service dependency. `dsh-better-sidebar` is
+  an optional add-on (the actual reviewing is host-side, and the config page
+  is also served standalone on 127.0.0.1:3987), so on any host where its
+  service was absent the entry stayed `pending (waiting for service:
+  betterSidebar)` forever. The web boot audit reports every pending entry —
+  `web boot: 1 entry did not activate` — and the shell renders that as a
+  "Failed to load plugins" notice across the whole main page, blaming a
+  plugin that was merely missing its optional companion.
+
+  The tab is now registered lazily through `ctx.inject(["betterSidebar"],
+  scope => ...)` — the same idiom the official client bundles use for
+  late-arriving services. The entry activates unconditionally; when
+  better-sidebar is present the tab appears exactly as before, and when it
+  is absent nothing is registered and nothing breaks.
+
+### Changed
+- `package.json#dsh.client.inject` is now `[]` (was `["betterSidebar"]`).
+  That field carries **package-row** names — every official bundle lists
+  packages such as `@deepseek-ai/dsh-client-ui-conversation` — while
+  `betterSidebar` is a Cordis *service*. The bundle needs no dynamic package
+  rows at all: `react` / `react-dom` are static seed words in the shell's
+  module table.
+
+### Notes
+- Test count 46 → 48. The old `inject=["betterSidebar"]` assertion is
+  replaced by three: no hard inject, `apply()` reaches the lazy path and
+  stays silent when the service never arrives, and `dsh.client.inject` lists
+  no service name.
+
 ## 0.5.2 — 2026-09-09
 
 ### Added
