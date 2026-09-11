@@ -10,9 +10,12 @@ concrete feedback. Once a turn has been steered `maxChallenges` times
 cap is a leak guard, not the real gate; the score threshold is.
 
 Tune the gate, switch the reviewer on/off, change the max-challenges cap,
-or pick a dedicated review model — all live, no host restart — through a
-self-hosted config UI on **`http://127.0.0.1:3987`** (or via the same
-JSON API from `curl`). The on-disk config lives at
+or pick a dedicated review model — all live, no host restart — from the
+**conversation dock** above the composer, from the optional sidebar tab,
+from the self-hosted config UI on **`http://127.0.0.1:3987`**, or via the
+same JSON API from `curl`. Every reviewed answer then shows its own
+**score chip** in the message action row (see
+[Score chip](#score-chip-since-070)). The on-disk config lives at
 `~/.dsh/answer-reviewer.json` (override with `REVIEWER_CONFIG_PATH`);
 turns of the host go through with the defaults if the file is absent.
 
@@ -27,6 +30,70 @@ context the harness happened to be carrying.
 The review model is independent from the agent's working model when
 `reviewProvider` / `reviewModel` are configured; otherwise the plugin
 falls back to the agent's current route so it works out of the box.
+
+The score is not just an internal gate — it is **shown on the answer it
+graded**:
+
+```
+  ⤷  ⧉  ↻  👍  👎   ● 评分 92        ← in the message's action row
+```
+
+## Score chip (since 0.7.0)
+
+Every finalized assistant message carries the score the reviewer gave it,
+as a small tinted chip in the message's action row, next to the shipped
+copy/retry and Like/Dislike buttons:
+
+| Verdict | Chip | Meaning |
+| --- | --- | --- |
+| Cleared the gate | `● 评分 92` on a green tint | `score >= threshold`; the turn closed on the first look |
+| Below the gate | `● 评分 61 · 第2次` on an amber tint | Steered back for a retry; the number in the chip is the attempt that finally counted |
+| Out of retries | `● 评分 55 · 第4次` on an amber tint | Still below the gate and `maxChallenges` was spent, so nothing was pushed back (since 0.7.1) |
+
+Hover the chip for the gate, the verdict and the reviewer's own reason:
+
+```
+阈值 80 · 通过 · 第 4 轮
+The reply answered the question but never named the failing file.
+```
+
+Design notes:
+
+- **It binds to the answer, not to the turn.** The score is recorded under
+  the same durable message id the shell hands to the action row
+  (`assistant/message` → `data.message.id`), so the chip and the gate can
+  never disagree about which answer a score belongs to.
+- **It renders nothing when there is no score.** Disabled plugin, no review
+  route, an unparseable reply, or an exhausted retry cap all leave the row
+  byte-identical to stock dsh — no placeholder, no spinner, no reserved space.
+- **Retries are visible.** A turn that was steered shows `第2次` on the answer
+  that finally passed, so a passing score on a third attempt does not read
+  like a first-try pass. A failed intermediate answer keeps its own chip if
+  it has one.
+- **The last answer always carries a chip.** The retry cap silences *steering*,
+  never the review — a turn whose `maxChallenges` ran out still publishes its
+  final score, marked `capped`. Anything else would make the answer the user
+  actually reads the one answer with no score (fixed in 0.7.1).
+- **Colours are the host's.** The chip uses dsh's own
+  `--dsw-alias-state-success-*` / `--dsw-alias-state-warn-*` tokens, so it
+  follows the active theme with no local palette.
+
+### The score feed
+
+The chip reads a same-origin JSON feed the host mounts on its own webserver:
+
+```
+GET /api/dsh-answer-reviewer/reviews   →   { entries: [...], at }
+```
+
+Each entry is `{ messageId, score, threshold, decision, attempt, turn, reason, at }`,
+newest first, capped at the 200 most recent scores. It is registered through
+the host's `ctx.webServer.register(...)` and gated by the composition's
+connection fence (Host/Origin check plus the login-token cookie), which is
+why the page can read it without any CORS relaxation. The `127.0.0.1:3987`
+sidecar deliberately does **not** grant cross-origin reads — doing so would
+let any site the user visits read and rewrite their reviewer config — but it
+does mirror the same payload at `/api/reviews` for `curl`.
 
 ## Why a separate model?
 
@@ -65,12 +132,65 @@ curl -s -X DELETE http://127.0.0.1:3987/api/config
 
 # See the last 20 review outcomes
 curl -s http://127.0.0.1:3987/api/recent
+
+# See the score of every recent assistant answer, by message id
+curl -s http://127.0.0.1:3987/api/reviews
 ```
 
 Disable the server with `REVIEWER_HTTP=0`. Change the port with
 `REVIEWER_HTTP_PORT=<n>`. Move the on-disk file with
 `REVIEWER_CONFIG_PATH=<abs path>`. The next turn picks up the new value
 with no host restart.
+
+## Conversation dock (since 0.6.0)
+
+The plugin registers a dock into the shell's `conversation.input.dock`
+slot — a quiet one-line strip sitting directly above the message composer,
+styled to match dsh's own dock entries:
+
+```
+⚙ Reviewer 配置                                                        ⌃
+```
+
+Click anywhere on the strip and the config form opens as an **overlay**
+floating just above it:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  ⚙ Reviewer 配置   127.0.0.1:3987   新标签              ⌄  │
+└────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                                                            │
+│                 (the config form, iframed)                 │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+Click again and the overlay disappears. The choice is remembered in
+`localStorage`, so the dock reopens the way you left it.
+
+Two deliberate design points:
+
+- **The panel overlays rather than pushing.** The strip lives inside dsh's
+  fixed-height composer column, so an inline panel would shove the composer
+  down and reflow the whole transcript every time you opened it. The overlay
+  is absolutely positioned, so the conversation never moves.
+- **The collapsed strip stays quiet.** Only the label is shown; the address
+  and the `新标签` deep link appear once the panel is open. The overlay is
+  capped at `min(38vh, 340px)` so it never dominates the view.
+
+This is the **primary** surface: it needs nothing beyond the core `slots`
+client service, so it is available on every install — no
+`dsh-better-sidebar` required. The iframe is mounted only while expanded,
+so a collapsed dock never runs the config page's poll timers. If the
+expanded dock cannot reach the config server (for example with
+`REVIEWER_HTTP=0`) it replaces the frame with a hint telling you where to
+look, rather than showing a blank box.
+
+The dock, the sidebar tab, and the standalone page all embed the **same**
+URL. Saving through any of them is observable to the others on the very
+next GET, because all three read the one `ConfigStore` living in the host
+process.
 
 ## Side card (since 0.5.0)
 
@@ -84,9 +204,9 @@ standalone server (and vice versa) on the very next GET. When the tab
 is not active the iframe unmounts so background tabs do not keep
 polling.
 
-If `dsh-better-sidebar` is not installed, the side card is hidden and
-the standalone `127.0.0.1:3987` page is the only surface. Both are
-optional and the plugin works with neither installed.
+If `dsh-better-sidebar` is not installed, the side card is simply hidden —
+the conversation dock and the standalone `127.0.0.1:3987` page still cover
+you. Every surface is optional and the plugin works with none of them.
 
 The better-sidebar dependency is **soft, by design**: the tab is waited for
 lazily (`ctx.inject(["betterSidebar"], …)`) rather than declared in

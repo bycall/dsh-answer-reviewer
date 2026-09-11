@@ -1,7 +1,7 @@
 {
   "name": "dsh-answer-reviewer",
-  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; below-threshold scores steer the agent with concrete feedback. Live config via 127.0.0.1 HTTP server, no host restart needed. Also exposed as a right-sidebar tab through dsh-better-sidebar.",
-  "version": "0.5.3",
+  "description": "dsh host plugin: every agent turn's final assistant output is reviewed by a separate LLM graded 1-100; below-threshold scores steer the agent with concrete feedback. The score is shown in the finalized answer's action row (conversation.chat.assistant-actions) via a same-origin feed, and the gate is tunable live from a collapsed dock above the composer (conversation.input.dock) or an optional right-sidebar tab, backed by a 127.0.0.1 HTTP server.",
+  "version": "0.7.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bycall/dsh-answer-reviewer.git"
@@ -45,8 +45,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.1 || ^0.1.3-alpha.1",
-    "@deepseek-ai/dsh-session": "^0.1.2-alpha.1 || ^0.1.3-alpha.1"
+    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.1 || ^0.1.3-alpha.1 || ^0.1.5-rc.1",
+    "@deepseek-ai/dsh-session": "^0.1.2-alpha.1 || ^0.1.3-alpha.1 || ^0.1.5-rc.1"
   },
   "license": "MIT"
 }

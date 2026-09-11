@@ -12,7 +12,7 @@
  * Exit code 0 = all green.
  */
 
-import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -23,16 +23,55 @@ const require = createRequire(import.meta.url)
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
 
+const NODE_VERSIONS = '/Users/bycall/.workbuddy/binaries/node/versions'
+const PROFILE_NM = `${process.env.HOME}/.dsh/profiles/web/node_modules`
+
+/**
+ * Every plausible `node_modules` directory that can satisfy an
+ * `@deepseek-ai/*` peer import at plugin runtime, most-preferred first.
+ *
+ * The managed Node runtime directory is versioned and gets REPLACED on
+ * WorkBuddy upgrades — `22.22.2-2` was deleted and `22.22.2-3` created on
+ * 2026-09-11, moving the global dsh install with it. Hardcoding one version
+ * therefore breaks this harness for no reason (and did). Discover instead.
+ */
+function hostModuleRoots() {
+  const roots = []
+  const seen = new Set()
+  const push = (p) => {
+    if (p && !seen.has(p)) { seen.add(p); roots.push(p) }
+  }
+  // 1) The active managed-runtime global install: `versions/current` names
+  //    it, and the plain sweep covers a stale/missing marker.
+  try {
+    const current = readFileSync(resolve(NODE_VERSIONS, 'current'), 'utf8').trim()
+    if (current) push(resolve(NODE_VERSIONS, current, 'lib/node_modules/@deepseek-ai/dsh/node_modules'))
+  } catch { /* no `current` marker */ }
+  try {
+    for (const v of readdirSync(NODE_VERSIONS)) {
+      push(resolve(NODE_VERSIONS, v, 'lib/node_modules/@deepseek-ai/dsh/node_modules'))
+    }
+  } catch { /* runtime dir missing */ }
+  // 2) Derive it from the profile's `dsh-tools` link, which points INTO the
+  //    global install's nested node_modules. Survives any version rename.
+  try {
+    const target = realpathSync(resolve(PROFILE_NM, '@deepseek-ai/dsh-tools'))
+    push(dirname(dirname(target)))
+  } catch { /* profile not linked yet */ }
+  // 3) The profile's own node_modules, then the plugin's local links.
+  push(PROFILE_NM)
+  push(resolve(pkgRoot, 'node_modules'))
+  return roots
+}
+
 /**
  * Resolve a peer package against the dsh host install, falling back to
  * `~/.dsh/profiles/web/node_modules`. Mirrors the resolution chain a
  * registered plugin would see at runtime.
  */
 function resolveHostPath(pkg) {
-  const dshGlobal = '/Users/bycall/.workbuddy/binaries/node/versions/22.22.2-2/lib/node_modules/@deepseek-ai/dsh/node_modules'
-  const profile = `${process.env.HOME}/.dsh/profiles/web/node_modules`
   const fullName = pkg.startsWith('@') ? pkg : `@deepseek-ai/${pkg}`
-  for (const base of [dshGlobal, profile]) {
+  for (const base of hostModuleRoots()) {
     try {
       const real = require.resolve(`${fullName}/package.json`, { paths: [base] })
       return dirname(real)
@@ -77,15 +116,19 @@ const {
   buildSteerMessage,
   createChallengeCounter,
   createConfigStore,
+  createReviewsHandler,
   defaultConfigPath,
   DEFAULT_HTTP_PORT,
   extractAssistantText,
   extractUserPrompts,
   isScoreAcceptable,
+  latestAssistantMessageId,
   name,
   onTurnStopping,
   parseScore,
   resolveConfig,
+  REVIEWS_ROUTE_PATH,
+  reviewsPayload,
   startServer,
   fmtLocalTime,
 } = plugin
@@ -507,7 +550,77 @@ test('onTurnStopping does not steer when score meets threshold', async () => {
   ok(latest && latest.score === 92, `recorded score 92, got ${latest && latest.score}`)
 })
 
-test('onTurnStopping stops steering after maxChallenges', async () => {
+test('onTurnStopping publishes the score under the answer it graded', async () => {
+  const reply = (score, reason) => (async function* () {
+    const text = JSON.stringify({ score, reason })
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })()
+
+  const userEvent = { type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'do thing' }] } }, seq: 0 }
+  const firstAnswer = { type: 'assistant/message', data: { turn: 1, message: { id: 'answer-1', content: [{ type: 'text', text: 'first try' }] } }, seq: 1 }
+  const agentFor = (events) => ({
+    session: { id: 's1', snapshotEvents: () => events },
+    options: { provider: 'p', model: 'm' },
+    steer() {},
+  })
+  const ctxFor = (score, reason) => ({
+    logger: { info() {}, warn() {} },
+    llm: { stream: () => reply(score, reason) },
+  })
+
+  // Below the gate: the failing score is published against the answer the
+  // reviewer read, so the UI can show WHY a retry happened.
+  const failing = await makeTestStore()
+  try {
+    await onTurnStopping(ctxFor(42, 'too thin'), failing.store, createChallengeCounter(), {
+      agent: agentFor([userEvent, firstAnswer]), turn: 1,
+    })
+    const entries = failing.store.getReviews()
+    ok(entries.length === 1, `one score recorded, got ${entries.length}`)
+    ok(entries[0].messageId === 'answer-1', `bound to the answer, got ${entries[0].messageId}`)
+    ok(entries[0].score === 42 && entries[0].decision === 'steer', `record=${JSON.stringify(entries[0])}`)
+    ok(entries[0].threshold === 80, `gate recorded, got ${entries[0].threshold}`)
+    ok(entries[0].attempt === 1, `attempt recorded, got ${entries[0].attempt}`)
+    ok(typeof entries[0].sessionId === 'string', 'session kept for the activity log')
+    // The activity ring keeps working alongside the new review ring.
+    ok(failing.store.getRecent().length === 1, 'activity entry still recorded')
+    // sessionId is diagnostics-only and must not reach the page.
+    ok(!('sessionId' in reviewsPayload(failing.store).entries[0]), 'payload strips sessionId')
+  } finally { failing.cleanup() }
+
+  // The retry produces a NEW answer id, so the two scores coexist instead of
+  // the passing one overwriting the failing one.
+  const retryAnswer = { type: 'assistant/message', data: { turn: 1, message: { id: 'answer-2', content: [{ type: 'text', text: 'second try' }] } }, seq: 2 }
+  const passing = await makeTestStore()
+  try {
+    await onTurnStopping(ctxFor(91, 'good'), passing.store, createChallengeCounter(), {
+      agent: agentFor([userEvent, firstAnswer, retryAnswer]), turn: 1,
+    })
+    const entries = passing.store.getReviews()
+    ok(entries.length === 1, `one record for the retry, got ${entries.length}`)
+    ok(entries[0].messageId === 'answer-2', `retry addressed by its own answer, got ${entries[0].messageId}`)
+    ok(entries[0].score === 91 && entries[0].decision === 'pass', `record=${JSON.stringify(entries[0])}`)
+  } finally { passing.cleanup() }
+
+  // An answer with no durable id still gets reviewed (the gate must never
+  // depend on the display path) but publishes nothing: the UI addresses
+  // scores by id, so an unkeyed record could never be shown.
+  const anonymous = await makeTestStore()
+  try {
+    await onTurnStopping(ctxFor(91, 'good'), anonymous.store, createChallengeCounter(), {
+      agent: agentFor([userEvent, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'no id' }] } }, seq: 1 }]),
+      turn: 1,
+    })
+    ok(anonymous.store.getReviews().length === 0, 'unaddressable answer publishes no score')
+    const latest = anonymous.store.getRecent().slice(-1)[0]
+    ok(latest && latest.decision === 'pass', `the gate still ran, got ${latest && latest.decision}`)
+  } finally { anonymous.cleanup() }
+})
+
+test('onTurnStopping publishes the final score but stops steering after maxChallenges', async () => {
   const steers = []
   const counter = createChallengeCounter()
   counter.bump('s3', 1)
@@ -525,7 +638,7 @@ test('onTurnStopping stops steering after maxChallenges', async () => {
     } },
   }
   const events = [
-    { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'bad reply' }] } }, seq: 0 },
+    { type: 'assistant/message', data: { turn: 1, message: { id: 'msg-cap-1', content: [{ type: 'text', text: 'bad reply' }] } }, seq: 0 },
   ]
   const agent = {
     session: { id: 's3', snapshotEvents: () => events },
@@ -535,8 +648,20 @@ test('onTurnStopping stops steering after maxChallenges', async () => {
   const { store, cleanup } = await makeTestStore()
   try {
     await onTurnStopping(ctx, store, counter, { agent, turn: 1 })
+    ok(steers.length === 0, 'cap exhausted => no further steer')
+
+    // The cap silences steering, NOT the review. The turn's final answer is the
+    // only one `conversation.chat.assistant-actions` binds to, so it must still
+    // carry a score or the answer the user reads is the one answer with none.
+    const reviews = store.getReviews()
+    ok(reviews.length === 1, `cap still publishes the final score, got ${reviews.length}`)
+    ok(reviews[0].messageId === 'msg-cap-1', `bound to the final message, got ${reviews[0].messageId}`)
+    ok(reviews[0].score === 10, `carried the score through, got ${reviews[0].score}`)
+    ok(reviews[0].decision === 'capped', `marked as capped, got ${reviews[0].decision}`)
+    ok(reviews[0].attempt === 6, `counts the capped answer as the 6th, got ${reviews[0].attempt}`)
+    const latest = store.getRecent().slice(-1)[0]
+    ok(latest && latest.decision === 'cap-exhausted', `activity ring still explains the cap, got ${latest && latest.decision}`)
   } finally { cleanup() }
-  ok(steers.length === 0, 'cap exhausted => no further steer')
 })
 
 test('Config schema covers the same defaults as resolveConfig', () => {
@@ -727,21 +852,147 @@ test('startServer DELETE wipes overrides back to defaults', async () => {
   } finally { handle?.close(); cleanup() }
 })
 
+// --- per-message scores -----------------------------------------------------
+// The conversation UI addresses a finalized answer by the durable id the shell
+// itself uses, so the score a turn displays and the score the plugin gated on
+// must be recorded under the same key.
+
+test('latestAssistantMessageId reads the id ui-chat addresses the turn by', () => {
+  const events = [
+    { type: 'user/message', data: { turn: 1, message: { id: 'u1', content: [] } } },
+    { type: 'assistant/message', data: { turn: 1, message: { id: 'a1', content: [] } } },
+    { type: 'assistant/message', data: { turn: 2, message: { id: 'b1', content: [] } } },
+    { type: 'assistant/message', data: { turn: 1, message: { id: 'a2', content: [] } } },
+    // Interrupted output is excluded everywhere else, so it must not become
+    // the address of the turn either.
+    { type: 'assistant/message', data: { turn: 1, interrupted: true, message: { id: 'a3', content: [] } } },
+  ]
+  ok(latestAssistantMessageId(events, 1) === 'a2', `turn 1 -> ${latestAssistantMessageId(events, 1)}`)
+  ok(latestAssistantMessageId(events, 2) === 'b1', `turn 2 -> ${latestAssistantMessageId(events, 2)}`)
+  ok(latestAssistantMessageId(events, 9) === null, 'absent turn -> null')
+  ok(latestAssistantMessageId(null, 1) === null, 'non-array -> null')
+  ok(latestAssistantMessageId(events, '1') === null, 'non-number turn -> null')
+  // An id-less message is not addressable: skip it rather than hand back
+  // undefined and have the caller record an unretrievable score.
+  ok(
+    latestAssistantMessageId([{ type: 'assistant/message', data: { turn: 1, message: { content: [] } } }], 1) === null,
+    'id-less message -> null'
+  )
+})
+
+test('ConfigStore.recordReview keys scores by message id and evicts oldest', async () => {
+  const { store, cleanup } = await makeTestStore()
+  try {
+    store.recordReview({ messageId: 'x', score: 10 })
+    // Re-recording one message replaces its record; the UI looks up by id.
+    store.recordReview({ messageId: 'x', score: 88 })
+    ok(store.getReviews().length === 1, `deduped to ${store.getReviews().length}`)
+    ok(store.getReviews()[0].score === 88, 'the latest score wins')
+    ok(typeof store.getReviews()[0].at === 'string', 'timestamp stamped')
+
+    // Unaddressable records never enter the ring.
+    store.recordReview({ messageId: '', score: 50 })
+    store.recordReview({ messageId: 'no-score', decision: 'pass' })
+    ok(store.getReviews().length === 1, `unusable records dropped, got ${store.getReviews().length}`)
+
+    for (let i = 0; i < 260; i += 1) store.recordReview({ messageId: `m-${i}`, score: 50 })
+    const all = store.getReviews()
+    ok(all.length === 200, `review ring capped at 200, got ${all.length}`)
+    ok(all[0].messageId === 'm-259', `newest first, got ${all[0].messageId}`)
+    ok(!all.some((entry) => entry.messageId === 'x'), 'the oldest record was evicted')
+  } finally { cleanup() }
+})
+
+test('reviewsPayload shapes records for the UI and drops unusable ones', async () => {
+  const { store, cleanup } = await makeTestStore()
+  try {
+    store.recordReview({
+      messageId: 'a', score: 91, threshold: 80, decision: 'pass',
+      attempt: 1, turn: 2, reason: 'good', sessionId: 'secret-session',
+    })
+    store.recordReview({
+      messageId: 'b', score: 61, threshold: 80, decision: 'steer',
+      attempt: 2, turn: 4, reason: 'x'.repeat(500),
+    })
+    const payload = reviewsPayload(store)
+    ok(payload.entries.length === 2, `kept ${payload.entries.length}`)
+    ok(payload.entries[0].messageId === 'b', `newest first, got ${payload.entries[0].messageId}`)
+    const b = payload.entries[0]
+    ok(b.threshold === 80 && b.attempt === 2 && b.turn === 4, `record=${JSON.stringify(b)}`)
+    ok(typeof b.at === 'string' && b.at.length > 0, 'record carries a timestamp')
+    ok(b.reason.length === 300, `reason trimmed to ${b.reason.length}`)
+    ok(!('sessionId' in b), `sessionId is not published: ${JSON.stringify(b)}`)
+    ok(typeof payload.at === 'string', 'payload carries its own timestamp')
+    ok(REVIEWS_ROUTE_PATH === '/api/dsh-answer-reviewer/reviews', `route=${REVIEWS_ROUTE_PATH}`)
+  } finally { cleanup() }
+})
+
+test('createReviewsHandler answers GET and defers to the host fence', async () => {
+  const { store, cleanup } = await makeTestStore()
+  const fakeRes = () => ({
+    statusCode: 0,
+    headers: {},
+    body: null,
+    setHeader(k, v) { this.headers[k] = v },
+    end(b) { this.body = b === undefined ? '' : b },
+  })
+  try {
+    store.recordReview({ messageId: 'm-1', score: 91, threshold: 80, decision: 'pass', attempt: 1, turn: 3 })
+
+    const open = createReviewsHandler(store)
+    const res = fakeRes()
+    open({ method: 'GET' }, res)
+    ok(res.statusCode === 200, `status=${res.statusCode}`)
+    const payload = JSON.parse(res.body)
+    ok(payload.entries.length === 1 && payload.entries[0].messageId === 'm-1', `body=${res.body}`)
+    ok(res.headers['content-type'].startsWith('application/json'), 'JSON content type')
+    ok(res.headers['cache-control'] === 'no-store', 'never cached')
+
+    const resPost = fakeRes()
+    open({ method: 'POST' }, resPost)
+    ok(resPost.statusCode === 405, `POST status=${resPost.statusCode}`)
+
+    // The host passes connection.requestRejection here. A refusal must answer
+    // the request and short-circuit BEFORE the payload is ever built.
+    let rejectCalls = 0
+    const guarded = createReviewsHandler(store, {
+      reject(req, r) { rejectCalls += 1; r.statusCode = 401; r.end(); return true },
+    })
+    const res401 = fakeRes()
+    guarded({ method: 'GET' }, res401)
+    ok(rejectCalls === 1, `fence called ${rejectCalls} times`)
+    ok(res401.statusCode === 401 && res401.body === '', `fenced status=${res401.statusCode}`)
+
+    // A fence that abstains lets the request through.
+    const abstaining = createReviewsHandler(store, { reject: () => false })
+    const resOk = fakeRes()
+    abstaining({ method: 'GET' }, resOk)
+    ok(resOk.statusCode === 200, `abstaining fence status=${resOk.statusCode}`)
+  } finally { cleanup() }
+})
+
 // --- Client bundle ----------------------------------------------------------
 // The client bundle is a self-executing script that calls
 // `window.__ModuleLoader__.load({ id, factory })`. We don't boot a browser
-// here; we set up a stub window + react + betterSidebar service and verify
-// the factory wires up correctly (apply() exists, registerTab called with
-// the expected descriptor, the rendered component mounts an iframe).
+// here; we set up a stub window + react + service stubs and verify the
+// factory wires up correctly: apply() exists, both mounts are registered
+// through the lazy ctx.inject path, and the rendered components mount an
+// iframe onto the standalone config page.
 
-test('client bundle loads, registers the tab, and renders an iframe', () => {
-  const registered = []
-  // Capture every effect-callback so we can drive them deterministically.
+/**
+ * Load lib/client.js inside a vm with a stub `window.__ModuleLoader__` and
+ * a stub react, then run the factory + apply(ctx) against a recording ctx.
+ *
+ * No browser and no reconciler: `createElement` immediately invokes function
+ * components, so a registered component can be called directly to obtain its
+ * element tree.
+ */
+function loadClientBundle({ storage } = {}) {
+  const registered = [] // betterSidebar tabs
   const effects = []
-  // Mini-React createElement: if the type is a function, call it with
-  // (props, ...children) and return its result; otherwise return a plain
-  // element tree. This lets the test drive the component without a real
-  // reconciler.
+  const injectCalls = []
+  const slotInjects = []
+  const slotRegistrations = []
   const createElement = function (type, props, ...children) {
     if (typeof type === 'function') {
       return type(Object.assign({}, props || {}), ...children)
@@ -756,66 +1007,327 @@ test('client bundle loads, registers the tab, and renders an iframe', () => {
     if (!opts || typeof opts.factory !== 'function') throw new Error('load called with no factory')
     exportsObj = opts.factory((id) => id === 'react' ? reactStub : null)
   } }
-  const sandbox = { window: { __ModuleLoader__: moduleLoader } }
+  const win = { __ModuleLoader__: moduleLoader }
+  if (storage) win.localStorage = storage
+  const sandbox = { window: win }
   vm.createContext(sandbox)
-  const code = readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8')
-  vm.runInContext(code, sandbox, { filename: 'lib/client.js' })
-  ok(exportsObj, 'factory returned an exports object')
-  ok(typeof exportsObj.apply === 'function', 'exports.apply is a function')
+  vm.runInContext(readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8'), sandbox, { filename: 'lib/client.js' })
 
-  // The host's client-loader would call apply(ctx) now. We do the same
-  // here, with a stub ctx whose `effect` records its callback, whose
-  // `inject` reports the lazily-waited services and drives its callback
-  // (as cordis does once the service is available), and whose
-  // `betterSidebar.registerTab` records its descriptor.
-  const injectCalls = []
+  // The host's client-loader calls apply(ctx) next. Every service is a stub
+  // that records what the bundle asked for. `inject` drives its callback
+  // immediately, mirroring cordis once the waited-for service is available.
   const ctx = {
     effect(fn) { effects.push(fn); return () => {} },
     inject(deps, cb) { injectCalls.push(deps); cb(ctx) },
+    slots: {
+      inject(slotName, cb) { slotInjects.push(slotName); return cb() },
+      register(descriptor, component) {
+        slotRegistrations.push({ descriptor, component })
+        return () => {}
+      },
+    },
     betterSidebar: { registerTab(desc) { registered.push(desc); return () => {} } },
   }
-  exportsObj.apply(ctx)
-  // betterSidebar must be waited for lazily (`ctx.inject`), not declared as
-  // a hard `exports.inject` dependency: a hard dependency leaves the entry
-  // "pending (waiting for service: betterSidebar)" and paints a
-  // "Failed to load plugins" banner on the host main page whenever
-  // dsh-better-sidebar is absent.
-  ok(injectCalls.length === 1, `apply() waited for deps once, got ${injectCalls.length}`)
+  return { exports: exportsObj, ctx, registered, effects, injectCalls, slotInjects, slotRegistrations }
+}
+
+/** Depth-first search for the first node of a given element type. */
+function findNode(node, type) {
+  if (!node || typeof node !== 'object') return null
+  if (node.type === type) return node
+  const kids = node.children
+  if (Array.isArray(kids)) {
+    for (const k of kids) { const f = findNode(k, type); if (f) return f }
+  } else if (kids && typeof kids === 'object') {
+    const f = findNode(kids, type); if (f) return f
+  }
+  return null
+}
+
+/** Every node of a given element type, depth-first. */
+function findAllNodes(node, type, out = []) {
+  if (!node || typeof node !== 'object') return out
+  if (node.type === type) out.push(node)
+  const kids = node.children
+  if (Array.isArray(kids)) {
+    for (const k of kids) findAllNodes(k, type, out)
+  } else if (kids && typeof kids === 'object') {
+    findAllNodes(kids, type, out)
+  }
+  return out
+}
+
+/** Concatenate every string leaf under a node — the element's text content. */
+function textOf(node) {
+  if (node === null || node === undefined || node === false || node === true) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (typeof node !== 'object') return ''
+  const kids = node.children
+  if (Array.isArray(kids)) return kids.map(textOf).join('')
+  return textOf(kids)
+}
+
+test('client bundle registers the dock, the score chip, and the sidebar tab', async () => {
+  const h = loadClientBundle()
+  ok(h.exports, 'factory returned an exports object')
+  ok(typeof h.exports.apply === 'function', 'exports.apply is a function')
+  h.exports.apply(h.ctx)
+
+  // Both mounts must go through the LAZY ctx.inject path — one entry, two
+  // optional deps. A hard `exports.inject` dependency would leave the entry
+  // "pending (waiting for service: ...)" and paint a
+  // "Failed to load plugins" banner whenever a service is absent.
+  const depSets = h.injectCalls.map((d) => d.join('+')).sort()
+  ok(depSets.length === 2, `apply() waited for deps twice, got ${depSets.length}`)
+  ok(depSets[0] === 'betterSidebar', `unexpected lazy deps: ${JSON.stringify(h.injectCalls)}`)
+  ok(depSets[1] === 'slots', `unexpected lazy deps: ${JSON.stringify(h.injectCalls)}`)
+  ok(h.effects.length === 2, `apply() registered two effects, got ${h.effects.length}`)
+
+  // Driving the effects is where both registrations live.
+  for (const fn of h.effects) fn()
+
+  // --- mount 1: conversation input dock -----------------------------------
+  ok(h.slotInjects.length === 2, `slots.inject called twice, got ${h.slotInjects.length}`)
   ok(
-    injectCalls[0].length === 1 && injectCalls[0][0] === 'betterSidebar',
-    `lazy inject deps=${JSON.stringify(injectCalls[0])}`
+    h.slotInjects[0] === 'conversation.input.dock',
+    `dock slot=${h.slotInjects[0]}`
   )
-  ok(effects.length === 1, `apply() registered one effect, got ${effects.length}`)
-  // Drive the effect — that is where registerTab lives.
-  effects[0]()
-  ok(registered.length === 1, `one tab registered, got ${registered.length}`)
-  const desc = registered[0]
+  ok(
+    h.slotInjects[1] === 'conversation.chat.assistant-actions',
+    `score slot=${h.slotInjects[1]}`
+  )
+  ok(h.slotRegistrations.length === 2, `two surfaces registered, got ${h.slotRegistrations.length}`)
+  const { descriptor, component } = h.slotRegistrations[0]
+  ok(descriptor.name === 'conversation.input.dock', `descriptor.name=${descriptor.name}`)
+  // `kind: "list"` slots THROW without options.id. Ordering for a list slot is
+  // `(priority ?? 0) || (order ?? 0)` — see the registry's entry sort — so
+  // `priority` is the primary key and `order` only breaks ties.
+  ok(descriptor.id === 'answer-reviewer:config', `descriptor.id=${descriptor.id}`)
+  ok(descriptor.priority === 30, `descriptor.priority=${descriptor.priority}`)
+  ok(typeof component === 'function', 'dock registration carries a component function')
+
+  // --- mount 2: the score chip in the assistant action row -----------------
+  const scoreReg = h.slotRegistrations[1]
+  ok(scoreReg.descriptor.name === 'conversation.chat.assistant-actions', `score name=${scoreReg.descriptor.name}`)
+  ok(scoreReg.descriptor.id === 'answer-reviewer:score', `score id=${scoreReg.descriptor.id}`)
+  // The shipped Like/Dislike entry takes the default order, so a positive one
+  // parks the score to its right instead of shadowing it.
+  ok(scoreReg.descriptor.order === 100, `score order=${scoreReg.descriptor.order}`)
+  ok(scoreReg.descriptor.priority === undefined, 'score chip does not fight over priority')
+  ok(typeof scoreReg.component === 'function', 'score registration carries a component function')
+  // No score for this message yet => the chip must render NOTHING, so the
+  // action row is byte-identical to stock dsh until a review lands.
+  const quiet = scoreReg.component({ messageId: 'msg-without-score' })
+  ok(quiet === null, `score chip renders null without a score, got ${JSON.stringify(quiet)}`)
+
+  // Collapsed by default => the iframe is UNMOUNTED so a closed dock never
+  // runs the page's poll timers.
+  const collapsed = component({ sessionId: 's1' })
+  ok(collapsed && collapsed.type === 'div', 'dock root is a div')
+  ok(findNode(collapsed, 'iframe') === null, 'collapsed dock mounts no iframe')
+  const toggle = findNode(collapsed, 'button')
+  ok(toggle, 'collapsed dock renders a toggle button')
+  // The whole strip is one button — icon + label + caret — matching dsh's own
+  // dock headers, so assert on aggregated text plus the aria state.
+  ok(textOf(toggle).includes('Reviewer 配置'), `strip label=${textOf(toggle)}`)
+  ok(toggle.props['aria-expanded'] === false, 'collapsed strip reports aria-expanded=false')
+  // The collapsed strip is deliberately quiet: no address, no deep link.
+  ok(!textOf(toggle).includes('127.0.0.1'), 'collapsed strip hides the address')
+  ok(!textOf(toggle).includes('新标签'), 'collapsed strip hides the deep link')
+
+  // Screenshot the second mount too.
+  ok(h.registered.length === 1, `one tab registered, got ${h.registered.length}`)
+  const desc = h.registered[0]
   ok(desc.id === 'dsh-answer-reviewer:config', `tab id=${desc.id}`)
   ok(desc.title === 'Reviewer 配置', `tab title=${desc.title}`)
   ok(desc.single === true, 'tab marked single-instance')
   ok(typeof desc.component === 'function', 'tab has a component function')
+  const tabTree = desc.component({ visible: true })
+  ok(tabTree && tabTree.type === 'div', 'tab root is a div')
+  const tabIframe = findNode(tabTree, 'iframe')
+  ok(tabIframe, 'tab tree contains an iframe')
+  ok(
+    tabIframe.props.src === 'http://127.0.0.1:3987/',
+    `tab iframe src=${tabIframe.props.src}`
+  )
+})
 
-  // Render the component. With the mini-React createElement above,
-  // `desc.component(props)` resolves the wrapper element by calling
-  // ReviewerConfigTab(props), so the tree we get back is the actual
-  // rendered root.
-  const tree = desc.component({ visible: true })
-  if (!tree || tree.type !== 'div') console.error('DEBUG tree:', JSON.stringify(tree, null, 2))
-  ok(tree && tree.type === 'div', 'root is a div')
-  function findIframe(node) {
-    if (!node || typeof node !== 'object') return null
-    if (node.type === 'iframe') return node
-    const kids = node.children
-    if (Array.isArray(kids)) {
-      for (const k of kids) { const f = findIframe(k); if (f) return f }
-    } else if (kids && typeof kids === 'object') {
-      const f = findIframe(kids); if (f) return f
+test('expanded dock mounts the config iframe and a collapse control', () => {
+  // localStorage remembers the expanded state across reloads.
+  const h = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
+  h.exports.apply(h.ctx)
+  for (const fn of h.effects) fn()
+  const { component } = h.slotRegistrations[0]
+
+  const tree = component({ sessionId: 's1' })
+  const iframe = findNode(tree, 'iframe')
+  ok(iframe, 'expanded dock mounts an iframe')
+  ok(
+    iframe.props.src === 'http://127.0.0.1:3987/',
+    `dock iframe src=${iframe.props.src}, expected the standalone config page`
+  )
+  const toggle = findNode(tree, 'button')
+  ok(toggle && toggle.props['aria-expanded'] === true, 'expanded strip reports aria-expanded=true')
+  ok(
+    textOf(toggle).includes('127.0.0.1:3987'),
+    `expanded strip surfaces the address: ${textOf(toggle)}`
+  )
+  ok(textOf(toggle).includes('新标签'), 'expanded strip offers the deep link')
+  // A dead config server must not leave the user staring at a blank frame.
+  ok(findAllNodes(tree, 'iframe').length === 1, 'exactly one iframe while expanded')
+})
+
+test('dock geometry cannot be crushed by the composer column', () => {
+  // Regression guard. `conversation.input.dock` entries are direct flex
+  // children of dsh's fixed-height `.composerStack`. With the default
+  // `flex-shrink: 1` the dock was squeezed to ~10px and its own
+  // `overflow: hidden` clipped the label into an unreadable sliver.
+  // `flex: none` is what stops that, and the width formula is what keeps the
+  // strip aligned with the composer card instead of the whole column.
+  const h = loadClientBundle({ storage: { getItem: () => '0', setItem() {} } })
+  h.exports.apply(h.ctx)
+  for (const fn of h.effects) fn()
+  const tree = h.slotRegistrations[0].component({ sessionId: 's1' })
+
+  ok(tree.props.style.flex === 'none', `dock root flex=${tree.props.style.flex}`)
+  const width = String(tree.props.style.width || '')
+  ok(width.includes('100% -'), `dock width is inset-based: ${width}`)
+  ok(
+    width.includes('--dsh-composer-side-clearance') &&
+      width.includes('--dsh-composer-dock-inset'),
+    `dock width reuses the composer geometry vars: ${width}`
+  )
+  ok(
+    String(tree.props.style.maxWidth).includes('--dsh-composer-card-max-width'),
+    `dock maxWidth reuses the composer card width: ${tree.props.style.maxWidth}`
+  )
+  ok(tree.props.style.position === 'relative', 'dock root is a positioning context')
+})
+
+test('expanded dock overlays instead of reflowing the transcript', () => {
+  // The panel must be taken OUT of flow. An inline panel inside the fixed
+  // composer column pushes the composer down and reflows every message,
+  // which is exactly the "intrusive" behaviour that was reported.
+  const h = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
+  h.exports.apply(h.ctx)
+  for (const fn of h.effects) fn()
+  const tree = h.slotRegistrations[0].component({ sessionId: 's1' })
+
+  // The overlay is the absolutely positioned child that is NOT the strip.
+  const positioned = []
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (node.props && node.props.style && node.props.style.position === 'absolute') {
+      positioned.push(node)
     }
-    return null
+    const kids = node.children
+    if (Array.isArray(kids)) kids.forEach(walk)
+    else if (kids && typeof kids === 'object') walk(kids)
   }
-  const iframe = findIframe(tree)
-  ok(iframe, 'tree contains an iframe')
-  ok(iframe && iframe.props && iframe.props.src === 'http://127.0.0.1:3987/', `iframe src=${iframe && iframe.props.src}`)
+  walk(tree)
+  ok(positioned.length === 1, `exactly one absolutely positioned panel, got ${positioned.length}`)
+  const overlay = positioned[0]
+  ok(overlay.props.style.bottom === '100%', `overlay bottom=${overlay.props.style.bottom}`)
+  ok(
+    String(overlay.props.style.height).includes('vh'),
+    `overlay height is viewport-capped: ${overlay.props.style.height}`
+  )
+  ok(findNode(overlay, 'iframe'), 'the iframe lives inside the overlay')
+
+  // And the strip itself must stay in flow, directly above the composer.
+  const strip = tree.children[1]
+  ok(strip && strip.props.style.position === 'relative', 'strip is the in-flow sibling')
+})
+
+test('dock embeds the SAME page as the sidebar tab (single source of truth)', () => {
+  // Both mounts iframe the standalone server, so the HTTP API and both UI
+  // mounts share one ConfigStore and cannot drift.
+  const collapsed = loadClientBundle({ storage: { getItem: () => '0', setItem() {} } })
+  collapsed.exports.apply(collapsed.ctx)
+  for (const fn of collapsed.effects) fn()
+  const dockComponent = collapsed.slotRegistrations[0].component
+  const tabComponent = collapsed.registered[0].component
+
+  // Force the dock open by replaying with storage = expanded.
+  const expanded = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
+  expanded.exports.apply(expanded.ctx)
+  for (const fn of expanded.effects) fn()
+  const dockIframe = findNode(expanded.slotRegistrations[0].component({}), 'iframe')
+  const tabIframe = findNode(tabComponent({ visible: true }), 'iframe')
+  ok(dockIframe && tabIframe, 'both mounts render an iframe')
+  ok(
+    dockIframe.props.src === tabIframe.props.src,
+    `dock=${dockIframe.props.src} tab=${tabIframe.props.src}`
+  )
+  ok(typeof dockComponent === 'function', 'dock component is a function')
+})
+
+test('score chip renders the score, its band, and the retry count', () => {
+  const h = loadClientBundle()
+  h.exports.apply(h.ctx)
+  for (const fn of h.effects) fn()
+  const chip = h.slotRegistrations[1].component
+  ok(typeof h.exports.__test?.setScores === 'function', 'bundle exposes the score test seam')
+
+  h.exports.__test.setScores({
+    pass: {
+      messageId: 'pass', score: 91, threshold: 80, decision: 'pass',
+      attempt: 1, turn: 3, reason: 'looks right', at: '2026-01-01T00:00:00.000Z',
+    },
+    low: {
+      messageId: 'low', score: 61, threshold: 80, decision: 'steer',
+      attempt: 2, turn: 4, reason: 'missed the ask', at: '2026-01-01T00:00:01.000Z',
+    },
+  })
+
+  const passing = chip({ messageId: 'pass' })
+  ok(passing && passing.type === 'span', 'chip root is a span')
+  ok(textOf(passing) === '评分 91', `passing label=${textOf(passing)}`)
+  // The band drives the tint through dsh's own state tokens, so the chip
+  // follows the host theme instead of hardcoding a palette.
+  ok(passing.props.style.background.includes('state-success'), `passing tint=${passing.props.style.background}`)
+  ok(passing.props['data-answer-reviewer-score'] === '91', 'score exposed as a data attribute')
+  ok(passing.props.title.includes('阈值 80'), `title carries the gate: ${passing.props.title}`)
+  ok(passing.props.title.includes('通过'), `title carries the verdict: ${passing.props.title}`)
+  ok(passing.props.title.includes('looks right'), `title carries the reason: ${passing.props.title}`)
+
+  const low = chip({ messageId: 'low' })
+  ok(textOf(low) === '评分 61 · 第2次', `low label=${textOf(low)}`)
+  ok(low.props.style.background.includes('state-warn'), `low tint=${low.props.style.background}`)
+  ok(low.props.title.includes('打回'), `low title=${low.props.title}`)
+
+  // A capped answer (below threshold, out of retries) is a distinct verdict:
+  // the score is published but nothing was pushed back, so saying "已打回" would
+  // be a lie. This is the case the whole cap-review fix exists to surface.
+  h.exports.__test.setScores({
+    capped: {
+      messageId: 'capped', score: 55, threshold: 90, decision: 'capped',
+      attempt: 4, turn: 3, reason: 'still wrong', at: '2026-01-01T00:00:02.000Z',
+    },
+  })
+  const capped = chip({ messageId: 'capped' })
+  ok(capped && textOf(capped) === '评分 55 · 第4次', `capped label=${textOf(capped)}`)
+  ok(capped.props.style.background.includes('state-warn'), `capped tint=${capped.props.style.background}`)
+  ok(capped.props.title.includes('重试次数已用尽'), `capped title=${capped.props.title}`)
+  ok(capped.props.title.includes('still wrong'), `capped title keeps the reason: ${capped.props.title}`)
+
+  // Silence, not a placeholder, for anything the reviewer skipped.
+  ok(chip({ messageId: 'unknown' }) === null, 'unknown message renders nothing')
+  ok(chip({}) === null, 'missing messageId renders nothing')
+  ok(chip(null) === null, 'null props renders nothing')
+})
+
+test('client bundle CONFIG_ORIGIN stays in sync with DEFAULT_HTTP_PORT', () => {
+  // The client bundle cannot import lib/config-store.js (it is loaded raw
+  // into the renderer, no bundler), so the port is duplicated as a literal.
+  // This guard is the only thing keeping the two from drifting apart.
+  const src = readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8')
+  const m = src.match(/http:\/\/127\.0\.0\.1:(\d+)/)
+  ok(m, 'client bundle declares a config origin')
+  ok(
+    Number(m[1]) === DEFAULT_HTTP_PORT,
+    `client origin port ${m[1]} != server DEFAULT_HTTP_PORT ${DEFAULT_HTTP_PORT}`
+  )
 })
 
 test('client bundle does not hard-depend on betterSidebar', () => {
@@ -845,11 +1357,13 @@ test('client bundle does not hard-depend on betterSidebar', () => {
   )
 })
 
-// Regression: with dsh-better-sidebar absent, cordis never fires the
-// `ctx.inject` callback, but the ENTRY still activates. apply() must
-// therefore neither throw nor touch `ctx.betterSidebar` on that path —
-// otherwise the host main page breaks instead of merely losing one tab.
-test('apply() survives a host without betterSidebar', () => {
+// Regression: when a service is absent (no dsh-better-sidebar, or a host
+// whose shell does not declare the dock slot), cordis never fires the
+// `ctx.inject` callback — but the ENTRY still activates. apply() must
+// therefore neither throw nor touch `ctx.betterSidebar` / `ctx.slots` on
+// that path, otherwise the host main page breaks instead of merely losing
+// one mount.
+test('apply() survives a host with neither betterSidebar nor slots', () => {
   const captured = {}
   const moduleLoader = { load(opts) {
     captured.exports = opts.factory((id) => id === 'react' ? { createElement(){}, default:{createElement(){}} } : null)
@@ -858,21 +1372,23 @@ test('apply() survives a host without betterSidebar', () => {
   vm.createContext(sandbox)
   vm.runInContext(readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8'), sandbox, { filename: 'lib/client.js' })
 
-  let lazyDeps = null
+  const lazyDeps = []
   const ctx = {
-    // Reached only if apply() eagerly registers — i.e. only if the lazy
-    // inject was replaced by a direct ctx.betterSidebar access.
-    effect() { throw new Error('apply() must not register eagerly without betterSidebar') },
+    // Reached only if apply() registers eagerly — i.e. only if a lazy
+    // inject was replaced by a direct ctx.slots / ctx.betterSidebar access.
+    effect() { throw new Error('apply() must not register eagerly without the service') },
     inject(deps, cb) {
-      lazyDeps = deps
+      lazyDeps.push(deps)
       // Cordis leaves the child fiber pending: the callback is simply never
       // called. Deliberately do NOT invoke cb.
       void cb
     },
   }
   captured.exports.apply(ctx) // must not throw
-  ok(lazyDeps !== null, 'apply() went through the lazy ctx.inject path')
-  ok(lazyDeps.length === 1 && lazyDeps[0] === 'betterSidebar', `lazy deps=${JSON.stringify(lazyDeps)}`)
+  const sets = lazyDeps.map((d) => d.join('+')).sort()
+  ok(sets.length === 2, `apply() waited for deps twice, got ${sets.length}`)
+  ok(sets[0] === 'betterSidebar', `missing lazy betterSidebar wait: ${JSON.stringify(lazyDeps)}`)
+  ok(sets[1] === 'slots', `missing lazy slots wait: ${JSON.stringify(lazyDeps)}`)
 })
 
 // The manifest's dsh.client.inject carries PACKAGE-ROW names (as every

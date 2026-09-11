@@ -4,6 +4,189 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.1 — 2026-09-11
+
+### Fixed
+- **The turn's final answer is now scored even when the retry cap is spent.**
+  `onTurnStopping` used to `return` early once `maxChallenges` was reached,
+  which skipped the review entirely. But a turn's final answer is the *only*
+  one `conversation.chat.assistant-actions` binds to — the intermediate answers
+  produced by steering are never the `closing.finalNode` the shell renders. So
+  a turn that exhausted its retries ended with the answer the user actually
+  reads being the one answer with no score, and the chip silently never
+  appeared.
+
+  The cap now suppresses **steering only**. A below-threshold answer at the cap
+  is still reviewed and published, recorded with `decision: "capped"` so the
+  tooltip can say *"未达标，重试次数已用尽"* instead of claiming a retry that
+  never happened. The activity ring still logs `cap-exhausted`.
+
+  Observed live: a turn that produced four answers (`024cdb59`, `80497c7c`,
+  `9221c72e`, `ee8cf4e9`) recorded scores only for the first three, and the
+  transcript — which shows only `ee8cf4e9` — showed no chip at all.
+
+## 0.7.0 — 2026-09-11
+
+### Added
+- **The review score is now shown in the conversation.** Every finalized
+  assistant message gets a score chip in its action row, beside the shipped
+  copy/retry and Like/Dislike buttons: a tinted pill reading `评分 92`, with a
+  state-coloured dot, and a tooltip carrying the gate, the verdict and the
+  reviewer's own reason.
+
+  The chip registers into `conversation.chat.assistant-actions` — the shell's
+  `list` slot documented as *"Ordered actions for one finalized assistant
+  message"*, `replaceRisk: "none"`, so it sits beside the shipped entries
+  rather than shadowing them. Registration is
+  `{ name, id: "answer-reviewer:score", order: 100 }`; the shipped feedback
+  entry keeps the default order, so the score lands to its right.
+
+  It renders **nothing** until a score exists for that exact message, so an
+  install where the reviewer never runs (disabled plugin, no review route,
+  unparseable reply, exhausted retry cap) looks byte-identical to stock dsh.
+
+- **A same-origin score feed on the host webserver.**
+  `GET /api/dsh-answer-reviewer/reviews` (`REVIEWS_ROUTE_PATH`) returns
+  `{ entries, at }`, newest first. It is registered through
+  `ctx.webServer.register({ kind: 'exact', path, handler })` — the same idiom
+  `dsh-host-open-in-app` uses — so it lives on the page's own origin and is
+  guarded by the composition's `connection.requestRejection` fence (Host and
+  Origin check plus the login-token cookie). Registered through a lazy
+  `ctx.inject(['webServer', 'connection'])`, so a non-web host loses only the
+  chip and does not stall the plugin's activation.
+
+  This deliberately avoids relaxing CORS on the `127.0.0.1:3987` sidecar: a
+  page on the host origin cannot read a different port without an
+  `Access-Control-Allow-Origin` the sidecar does not grant, and granting one
+  would let any site the user visits read and rewrite their reviewer config.
+  The sidecar still serves the same payload at `/api/reviews` for `curl`.
+
+- **Scores are recorded per assistant message.** `ConfigStore.recordReview`
+  keeps a message-id-keyed ring (200 entries) alongside the existing activity
+  ring (50), because the UI looks a score up on scroll-back for every visible
+  completed turn. `reviewsPayload` shapes the wire form and strips
+  `sessionId`, which is diagnostics-only.
+
+### Changed
+- **`onTurnStopping` now also records the durable id of the answer it graded.**
+  `latestAssistantMessageId(events, turn)` reads `assistant/message` →
+  `data.message.id`, which is exactly the identity ui-chat hands to
+  `conversation.chat.assistant-actions`
+  (`messageId: close.finalNode.messageId`). Recording under that same key is
+  what stops the displayed score and the gating score from drifting apart. The
+  record also carries the threshold in force at review time, so a later
+  threshold edit cannot retroactively recolour old chips, and the attempt
+  number, so a retried turn can say `评分 61 · 第2次`.
+
+### Notes
+- Test count 53 → 59. New coverage: `latestAssistantMessageId` turn
+  selection (including skipping interrupted and id-less messages), the
+  message-keyed ring and its eviction, `reviewsPayload` shaping and trimming,
+  `createReviewsHandler` (GET/405, the refusal short-circuit, an abstaining
+  fence), the chip's label/band/tooltip and its deliberate silence, and an
+  `onTurnStopping` integration test proving the score lands under the answer
+  it graded — including that a retry's new answer id does not overwrite the
+  failed one, and that an id-less answer is still gated but publishes nothing.
+- The client bundle exposes `exports.__test` (`setScores`, `scoreBand`,
+  `scoreLabel`, `scoreTooltip`). The score feed is module-private state with no
+  cordis service to reach through, so the harness needs a seam.
+- The chip's colours come from dsh's own `--dsw-alias-state-success-*` and
+  `--dsw-alias-state-warn-*` tokens, so both themes resolve with no local
+  palette.
+
+## 0.6.1 — 2026-09-11
+
+### Fixed
+- **The dock is no longer crushed to a ~10px sliver.** `conversation.input.dock`
+  entries are rendered as *direct flex children of dsh's fixed-height
+  `.composerStack`*. With the default `flex-shrink: 1` the strip was squeezed
+  until only a few pixels remained, and its own `overflow: hidden` then clipped
+  the label — the row rendered as an unreadable broken sliver. The root now
+  sets `flex: none`, exactly like dsh's own `QueueDock`.
+- **The dock no longer stretches across the whole conversation column.** It now
+  repeats dsh's own width formula
+  (`width: calc(100% - 2*clearance - 2*inset)` +
+  `max-width: calc(card-max - 2*inset)` + `margin: 0 auto calc(0 - gap - 3px)`),
+  read off `QueueDock.module.css`, so it lines up with the composer card.
+
+### Changed
+- **Restyled to match dsh's native dock entries.** The strip is now a single
+  32px button row (sliders glyph + 13px/500 label + rotating caret) on the
+  native `--dsw-specific-tip` panel with a `12px 12px 0 0` radius and a
+  `--dsw-alias-border-l1` hairline on three sides, so it reads as part of the
+  composer's chrome instead of a floating widget. The previous bordered
+  "展开" pill is gone.
+- **Opening the dock no longer reflows the transcript.** The config panel is
+  now an absolutely positioned overlay anchored at `bottom: 100%` of the strip
+  (with `z-index: 30`, a 12px radius and a soft shadow) instead of an inline
+  block. The old inline panel grew inside the fixed composer column, shoving
+  the composer down and reflowing every message.
+- **Smaller footprint when open.** The overlay is capped at
+  `min(38vh, 340px)` (previously `min(56vh, 440px)`), and the collapsed strip
+  hides the address and the `新标签` deep link, which now only appear while the
+  panel is open.
+
+### Notes
+- Test count 51 → 53. The two new tests are regression guards for exactly the
+  two defects above: `dock geometry cannot be crushed by the composer column`
+  asserts `flex: none` plus the composer-aligned width/max-width, and
+  `expanded dock overlays instead of reflowing the transcript` asserts there
+  is exactly one absolutely positioned panel, anchored at `bottom: 100%` with
+  a viewport-capped height, containing the iframe.
+- The two dock tests now aggregate text with a `textOf()` helper instead of
+  asserting on `button.children === '展开'`, because the whole strip is one
+  button and the disclosure affordance is the caret rather than a text label.
+  They assert `aria-expanded` and the open-only address/deep-link instead.
+
+## 0.6.0 — 2026-09-11
+
+### Added
+- **A config dock on the conversation page.** The bundle now registers into
+  the shell's `conversation.input.dock` slot: a collapsed strip above the
+  composer that expands into the same config iframe the sidebar tab and the
+  standalone server already use. Collapsed by default, and collapsing
+  *unmounts* the iframe so a closed dock never runs the page's poll timers.
+  The expanded/collapsed choice is remembered in `localStorage`.
+
+  This is the **primary** mount because it needs nothing beyond the core
+  `slots` client service, so it works on every install — the sidebar tab
+  remains an optional add-on for people who prefer the sidebar, and the
+  standalone `127.0.0.1:3987` page is unchanged.
+
+  When the expanded dock cannot reach the config server (e.g.
+  `REVIEWER_HTTP=0`) it swaps the frame for an actionable hint instead of
+  leaving a blank box.
+
+### Changed
+- The sidebar tab and the dock now share one `ConfigFrame` helper, so both
+  mounts embed byte-identical URLs and cannot drift apart.
+
+### Fixed
+- **`test/smoke.mjs` no longer hardcodes the managed Node runtime path.**
+  It pinned the peer-resolution root at
+  `.../node/versions/22.22.2-2/...`, which stopped existing when the
+  WorkBuddy runtime was swapped to `22.22.2-3` on 2026-09-11 — the harness
+  then failed to locate `cordis` / `dsh-llm` / `dsh-session` / `schemastery`
+  and could not run at all. The root is now discovered from
+  `versions/current`, a sweep of `versions/*`, the profile's `dsh-tools`
+  symlink target, and finally the profile's own `node_modules`.
+
+### Notes
+- Registration uses `{ name, id, priority }`. Two non-obvious facts about
+  the slot registry, both read off the shipped shell bundle:
+  `kind: "list"` slots **throw** without `options.id`
+  (`list slot "<name>" requires options.id`), and list ordering sorts by
+  `(options.priority ?? 0)` first and `(options.order ?? 0)` only as a
+  tie-break — so `priority` is the primary key and `order` is still a
+  usable secondary one (dsh's own dock entries use `order: 0` / `order: 20`).
+- `locale` is not validated by the registry and is deliberately omitted, so
+  the dock adds no i18n surface; its few labels stay hardcoded Chinese.
+- Test count 48 → 51. New coverage: both mounts registered through the lazy
+  path, the dock descriptor shape (`id` / `priority`), collapsed mounts no
+  iframe, expanded mounts exactly one, dock and tab embed the same URL, and
+  the client's duplicated port literal stays in sync with
+  `DEFAULT_HTTP_PORT`.
+
 ## 0.5.3 — 2026-09-10
 
 ### Fixed
