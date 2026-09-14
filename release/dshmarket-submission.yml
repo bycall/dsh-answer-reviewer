@@ -1,11 +1,26 @@
 # dshmarket submission entry for dsh-answer-reviewer.
-# Copy to <fork-of-awesome-dsh-plugin>/data/plugins/bycall__dsh-answer-reviewer.yml
-# and open a PR against https://github.com/awesome-dsh-plugin/awesome-dsh-plugin.
 #
-# Rules enforced by CI (pr-gate.yml / check-submission.mjs):
+# The entry is ALREADY MERGED — data/plugins/bycall__dsh-answer-reviewer.yml
+# is in awesome-dsh-plugin/main (added by the add/dsh-answer-reviewer branch).
+# So this file is the source of truth for *updates*, not a fresh submission:
+# copy it over the merged file on a branch off upstream/main and PR that diff.
+#
+# Update PR shape (verified against the live repo on 2026-09-14):
+#   - the PR carries ONLY data/plugins/<owner>__<repo>.yml. The READMEs are a
+#     generated artifact and sync-readme.yml regenerates them on main after
+#     merge; pr-check.yml accepts either "yml only" or "yml + regenerated
+#     READMEs that match", but the maintainers' pull_request_template.md asks
+#     contributors not to commit them, and yml-only avoids conflicts over
+#     generated lines with unrelated submissions in the same category.
+#   - the editable key is `description`; url/name/category should not drift.
+#
+# Rules enforced by CI (pr-check.yml, then pr-gate.yml via workflow_run):
 #   - repo must contain a dsh.bundle declaration (package.json has dsh.bundle.patch) ✓
-#   - repo must be >= 1 day old, >= 10 commits
-#   - filename must equal slugFor(url): <owner>__<repo>.yml
+#   - repo must exist, not be archived, and be >= 1 day old. The old >= 10
+#     commit floor was DROPPED on 2026-09-03 — it measured habit, not quality.
+#   - filename must equal slugFor(url): <owner>__<repo>.yml, exactly one level
+#     deep under data/plugins/ (readEntries() globs data/plugins/*.yml and is
+#     not recursive, so any other depth is silently skipped by every check)
 #   - only keys: url, name, category, description, tarball (no `npm:` key — npm
 #     mapping is resolved automatically from the repository)
 url: https://github.com/bycall/dsh-answer-reviewer
