@@ -4,6 +4,44 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.2 — 2026-09-15
+
+### Changed
+- **Host contract widened to DeepSeek Harness 0.1.6-alpha.1.** The two host
+  packages this plugin imports at runtime — `@deepseek-ai/dsh-llm` and
+  `@deepseek-ai/dsh-session` — now accept `^0.1.6-alpha.1` alongside the
+  previously supported lines.
+
+  The range has to *name* the new line rather than widen to something like
+  `>=0.1.5-rc.1`: npm evaluates the prerelease rule per comparator set, so a
+  prerelease version only satisfies a set when some comparator in it shares the
+  version's `[major, minor, patch]` tuple. `0.1.6-alpha.1` shares a tuple with
+  none of the earlier comparators, so without an explicit `^0.1.6-alpha.1`
+  alternative the plugin is reported incompatible with the current host.
+
+- **No code change was needed for 0.1.6.** The one hook 0.1.6 removed,
+  `agent/session-start`, was never used here; the plugin hooks `onTurnStopping`
+  and the LLM seam only.
+
+  `Session.snapshotEvents()` — read at `lib/index.js` — is deprecated as of
+  0.1.6 (see the *deprecate-synchronous-session-event-reads* Agent Note), but
+  the deprecation explicitly tolerates existing callers
+  (*"Existing logic may remain unmigrated for now, but new calls are
+  prohibited"*), and the read was already written as `typeof
+  session.snapshotEvents === 'function'` with a `session.events` fallback, so it
+  degrades to no-transcript rather than throwing if the method is ever dropped.
+  Migrating to the async read path is tracked as a follow-up, not a 0.1.6
+  requirement.
+
+### Fixed
+- **`@deepseek-ai/schemastery` is now declared.** `lib/review.js` imports it for
+  the `z.object({...})` config schema that backs the live gate settings, but the
+  specifier appeared in no dependency field. It resolved only because the host's
+  module fallback symlinks every `@deepseek-ai/*` package it owns into each
+  plugin's own `node_modules` — that is the host being generous, not a contract
+  the plugin had subscribed to. The peer is now declared at `^3.18.1`, the same
+  upstream line `dsh-builtin-browser` declares.
+
 ## 0.7.1 — 2026-09-11
 
 ### Fixed
