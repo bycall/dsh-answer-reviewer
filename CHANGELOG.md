@@ -4,6 +4,19 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.4 — 2026-09-23
+
+### Added
+- `scripts.verify` (`check` + `test`) and a `prepublishOnly` hook, so the smoke
+  suite gates every future publish. `check` walks all of `lib/*.js` with
+  `node --check`, not just the entry point.
+- `keywords`, `author`, and `engines.node >= 18` — bringing the manifest in line
+  with the sibling `dsh-engineer-tools` package.
+
+### Notes
+- Metadata-only. `0.7.3` carried the substantive change (the 0.1.7 peer range);
+  this release exists so the published manifest matches the repository.
+
 ## 0.7.3 — 2026-09-23
 
 ### Changed
