@@ -4,6 +4,23 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.3 — 2026-09-23
+
+### Changed
+- **Host contract widened to DeepSeek Harness 0.1.7-alpha.1.** `@deepseek-ai/dsh-llm`
+  and `@deepseek-ai/dsh-session` now also accept `^0.1.7-alpha.1`.
+
+  This is a *tuple* change, which is the case the prerelease rule actually
+  bites on. `^0.1.6-alpha.1` expands to `>=0.1.6-alpha.1 <0.2.0`, and
+  `0.1.7-alpha.2` shares its `[major, minor, patch]` tuple with no comparator
+  in that set — so `0.1.6 → 0.1.7` is **not** covered for free, unlike
+  `0.1.6-alpha.1 → 0.1.6-alpha.2`. Verified with `semver.satisfies`:
+  the old range FAILs against `0.1.7-alpha.2`; the new range passes.
+
+  No source change was needed: this plugin does not import `@deepseek-ai/dsh-settings`,
+  so the 0.1.7 settings-API rework (`ctx.settings.register()` removed in favour of
+  schema-derived forms) does not apply to it.
+
 ## 0.7.2 — 2026-09-15
 
 ### Changed
