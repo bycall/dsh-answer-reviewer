@@ -1,4 +1,5 @@
-<img width="2200" height="1300" alt="image" src="https://github.com/user-attachments/assets/d7c8bb85-d183-4017-9c39-128595027bdb" />
+<img width="1617" height="1077" alt="image" src="https://github.com/user-attachments/assets/303e3be5-c07e-44a8-bfae-868ab796cd0d" />
+
 
 # dsh-answer-reviewer
 
