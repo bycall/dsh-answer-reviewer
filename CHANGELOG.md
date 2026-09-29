@@ -4,6 +4,64 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.6 — 2026-09-29
+
+### Changed
+
+- **The config page moved from a dock above the composer to a first-class tab
+  in the conversation view ring.** The plugin now registers into
+  `conversation.view` — the `对话 / 轨迹 / 记忆系统` strip above the input — at
+  `order: 40`, so the new tab lands last, after every shipped conversation
+  view. The tab reads **Reviewer 配置** and the view area *is* the page: no
+  collapse control, no overlay, no floating panel, nothing wedged above the
+  composer.
+
+  The host builds that strip from `slots.entries("conversation.view")`, where
+  an entry without an `id` is skipped outright and the tab text is
+  `resolveSlotLabel(options.label) ?? options.id` — so a `label` thunk plus a
+  unique `id` is all a tab needs. The host renders a registered view only while
+  it is the active tab (`renderSlot("conversation.view", props, { only: viewId })`),
+  so switching away unmounts the subtree and the iframe's poll timers stop on
+  their own. That is why the view component takes no `visible` prop and keeps no
+  persisted open/closed state: **tab activation is the mount signal.**
+
+### Removed
+
+- The `conversation.input.dock` registration and its entire subsystem (~320
+  lines): the collapsed one-line strip, the absolutely-positioned overlay, the
+  `localStorage` open/closed memory (`readStoredOpen` / `storeOpen`), the
+  `DockIcon` / `DockCaret` glyphs, and the `ConfigFrame({ fill: true })` overlay
+  variant. `ConfigFrame` is now a single no-arg component shared by the view tab
+  and the optional better-sidebar tab.
+
+### Notes
+
+- The dock existed only because `conversation.view` looked unusable by third
+  parties at the time (0.6.0). It is in fact a documented `kind: "list"` child
+  slot of `conversation.session`, and `id` is mandatory. Nothing else changed:
+  the score chip, the optional sidebar tab, the `127.0.0.1:3987` HTTP server,
+  the `ConfigStore`, and the whole review pipeline are untouched.
+- Verified live on dsh `0.2.0-rc.1`: the strip reads
+  `对话 轨迹 记忆系统 Reviewer 配置`, clicking the tab mounts the config iframe
+  (1913×1011, `http://127.0.0.1:3987/`) with **zero console errors**, and the
+  server-down hint stays hidden while the sidecar is up.
+- Tests: the five dock tests were replaced by four view-tab tests — tab
+  `id` / `order` / `label`, full-area fill with no `localStorage`, no collapse
+  control or overlay, and both mounts embedding the same page. 58/58 pass.
+
+## 0.7.5 — 2026-09-29
+
+### Changed
+
+- **Host contract widened to DeepSeek Harness `0.2.0-rc.1`.** `@deepseek-ai/dsh-llm`
+  and `@deepseek-ai/dsh-session` now also accept `^0.2.0-rc.1`.
+
+### Notes
+
+- Metadata-only. dsh 0.2.0 added a **peer hard gate**: a bundle whose peer range
+  does not cover the running host is skipped wholesale at boot, so the range had
+  to be widened before the plugin would load at all on the new host.
+
 ## 0.7.4 — 2026-09-23
 
 ### Added

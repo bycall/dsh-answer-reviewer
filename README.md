@@ -11,9 +11,9 @@ cap is a leak guard, not the real gate; the score threshold is.
 
 Tune the gate, switch the reviewer on/off, change the max-challenges cap,
 or pick a dedicated review model — all live, no host restart — from the
-**conversation dock** above the composer, from the optional sidebar tab,
-from the self-hosted config UI on **`http://127.0.0.1:3987`**, or via the
-same JSON API from `curl`. Every reviewed answer then shows its own
+**Reviewer 配置 tab** in the conversation view ring above the composer,
+from the optional sidebar tab, from the self-hosted config UI on
+**`http://127.0.0.1:3987`**, or via the same JSON API from `curl`. Every reviewed answer then shows its own
 **score chip** in the message action row (see
 [Score chip](#score-chip-since-070)). The on-disk config lives at
 `~/.dsh/answer-reviewer.json` (override with `REVIEWER_CONFIG_PATH`);
@@ -142,52 +142,51 @@ Disable the server with `REVIEWER_HTTP=0`. Change the port with
 `REVIEWER_CONFIG_PATH=<abs path>`. The next turn picks up the new value
 with no host restart.
 
-## Conversation dock (since 0.6.0)
+## Config tab (since 0.7.6)
 
-The plugin registers a dock into the shell's `conversation.input.dock`
-slot — a quiet one-line strip sitting directly above the message composer,
-styled to match dsh's own dock entries:
-
-```
-⚙ Reviewer 配置                                                        ⌃
-```
-
-Click anywhere on the strip and the config form opens as an **overlay**
-floating just above it:
+The plugin registers a first-class tab into the shell's `conversation.view`
+slot — the same ring that carries dsh's own `对话 / 轨迹 / 记忆系统` tabs above
+the composer:
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  ⚙ Reviewer 配置   127.0.0.1:3987   新标签              ⌄  │
-└────────────────────────────────────────────────────────────┘
-┌────────────────────────────────────────────────────────────┐
-│                                                            │
-│                 (the config form, iframed)                 │
-│                                                            │
-└────────────────────────────────────────────────────────────┘
+  对话 │ 轨迹 │ 记忆系统 │ Reviewer 配置
+                          ╰──────────── active → the main area is the page
 ```
 
-Click again and the overlay disappears. The choice is remembered in
-`localStorage`, so the dock reopens the way you left it.
+Click the tab and the config page takes over the conversation area, exactly
+like any other conversation view:
 
-Two deliberate design points:
+```
+┌────────────────────────────────────────────────────────┐
+│  dsh-answer-reviewer · 实时配置   新标签打开  127.0.0.1:3987 │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│              (the config form, iframed)                │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
 
-- **The panel overlays rather than pushing.** The strip lives inside dsh's
-  fixed-height composer column, so an inline panel would shove the composer
-  down and reflow the whole transcript every time you opened it. The overlay
-  is absolutely positioned, so the conversation never moves.
-- **The collapsed strip stays quiet.** Only the label is shown; the address
-  and the `新标签` deep link appear once the panel is open. The overlay is
-  capped at `min(38vh, 340px)` so it never dominates the view.
+Three deliberate design points:
+
+- **It is a real view, not a strip above the composer.** The tab is registered
+  with `order: 40`, so it lands after every shipped view (chat `0`,
+  trajectory `10`, mnemon `30`). dsh renders a registered view only while it is
+  the *active* tab, so switching away unmounts the iframe and its poll timers
+  stop on their own — no `visible` prop, no persisted open/closed state.
+- **No collapse control and no overlay.** A tab has no "open" and "closed"; the
+  view area *is* the page. That removes the old dock's whole geometry problem
+  (overlaying rather than pushing the fixed-height composer column) at the
+  source.
+- **A dead config server gets a hint, not a blank frame.** The view probes
+  `/api/health` once on mount; if the sidecar is down (e.g. `REVIEWER_HTTP=0`)
+  it replaces the frame with an actionable message pointing at the port and the
+  host log.
 
 This is the **primary** surface: it needs nothing beyond the core `slots`
-client service, so it is available on every install — no
-`dsh-better-sidebar` required. The iframe is mounted only while expanded,
-so a collapsed dock never runs the config page's poll timers. If the
-expanded dock cannot reach the config server (for example with
-`REVIEWER_HTTP=0`) it replaces the frame with a hint telling you where to
-look, rather than showing a blank box.
+client service, so it is available on every install — no `dsh-better-sidebar`
+required.
 
-The dock, the sidebar tab, and the standalone page all embed the **same**
+The tab, the sidebar tab, and the standalone page all embed the **same**
 URL. Saving through any of them is observable to the others on the very
 next GET, because all three read the one `ConfigStore` living in the host
 process.
@@ -205,7 +204,7 @@ is not active the iframe unmounts so background tabs do not keep
 polling.
 
 If `dsh-better-sidebar` is not installed, the side card is simply hidden —
-the conversation dock and the standalone `127.0.0.1:3987` page still cover
+the config tab and the standalone `127.0.0.1:3987` page still cover
 you. Every surface is optional and the plugin works with none of them.
 
 The better-sidebar dependency is **soft, by design**: the tab is waited for
@@ -310,12 +309,14 @@ chunks). It does not boot a dsh host.
   `defaultConfigPath`, env-var constants for the HTTP server.
 - `lib/server.js` — `startServer(store, opts)` — the 127.0.0.1-only
   `node:http` instance (HTML form + JSON API).
-- `lib/client.js` — `window.__ModuleLoader__.load` client bundle. When
-  the host profile includes `dsh-better-sidebar`, registers a
-  "Reviewer 配置" side card; otherwise the entry still activates and the
-  card is simply never registered.
+- `lib/client.js` — `window.__ModuleLoader__.load` client bundle. Registers
+  the score chip and the `Reviewer 配置` tab into the shell's
+  `conversation.chat.assistant-actions` / `conversation.view` slots; when the
+  host profile also includes `dsh-better-sidebar`, registers a
+  "Reviewer 配置" side card too. Both mounts are optional and the entry
+  activates with neither.
 - `cordis.patch.yml` — cordis bundle entry that mounts the plugin.
-- `test/smoke.mjs` — node ESM smoke test (48 cases).
+- `test/smoke.mjs` — node ESM smoke test (58 cases).
 - `CONFIGURE.md` — detailed configuration guide (default vs independent
   review model, threshold tuning, fail-closed/fail-open matrix).
 - `CHANGELOG.md` — versioned release history.

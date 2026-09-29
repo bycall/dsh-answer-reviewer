@@ -1067,7 +1067,7 @@ function textOf(node) {
   return textOf(kids)
 }
 
-test('client bundle registers the dock, the score chip, and the sidebar tab', async () => {
+test('client bundle registers the config view tab, the score chip, and the sidebar tab', async () => {
   const h = loadClientBundle()
   ok(h.exports, 'factory returned an exports object')
   ok(typeof h.exports.apply === 'function', 'exports.apply is a function')
@@ -1086,25 +1086,30 @@ test('client bundle registers the dock, the score chip, and the sidebar tab', as
   // Driving the effects is where both registrations live.
   for (const fn of h.effects) fn()
 
-  // --- mount 1: conversation input dock -----------------------------------
+  // --- mount 1: the config tab in the conversation view ring ---------------
   ok(h.slotInjects.length === 2, `slots.inject called twice, got ${h.slotInjects.length}`)
-  ok(
-    h.slotInjects[0] === 'conversation.input.dock',
-    `dock slot=${h.slotInjects[0]}`
-  )
+  ok(h.slotInjects[0] === 'conversation.view', `config slot=${h.slotInjects[0]}`)
   ok(
     h.slotInjects[1] === 'conversation.chat.assistant-actions',
     `score slot=${h.slotInjects[1]}`
   )
   ok(h.slotRegistrations.length === 2, `two surfaces registered, got ${h.slotRegistrations.length}`)
   const { descriptor, component } = h.slotRegistrations[0]
-  ok(descriptor.name === 'conversation.input.dock', `descriptor.name=${descriptor.name}`)
-  // `kind: "list"` slots THROW without options.id. Ordering for a list slot is
-  // `(priority ?? 0) || (order ?? 0)` — see the registry's entry sort — so
-  // `priority` is the primary key and `order` only breaks ties.
+  ok(descriptor.name === 'conversation.view', `descriptor.name=${descriptor.name}`)
+  // `id` is doubly mandatory here: a `kind: "list"` slot THROWS without it,
+  // and the host's own viewTabs() SKIPS any entry whose id is undefined — so
+  // omitting it would register silently and never paint a tab.
   ok(descriptor.id === 'answer-reviewer:config', `descriptor.id=${descriptor.id}`)
-  ok(descriptor.priority === 30, `descriptor.priority=${descriptor.priority}`)
-  ok(typeof component === 'function', 'dock registration carries a component function')
+  // Shipped view orders are chat 0 / trajectory 10 / mnemon 30, so 40 parks
+  // this tab last — after every conversation view, which is where a settings
+  // page belongs.
+  ok(descriptor.order === 40, `descriptor.order=${descriptor.order}`)
+  // The host renders the tab text through
+  // `resolveSlotLabel(options.label) ?? options.id`, so a missing label
+  // silently degrades to the raw id.
+  ok(typeof descriptor.label === 'function', 'tab label is a thunk (locale-friendly)')
+  ok(descriptor.label() === 'Reviewer 配置', `tab label=${descriptor.label()}`)
+  ok(typeof component === 'function', 'config registration carries a component function')
 
   // --- mount 2: the score chip in the assistant action row -----------------
   const scoreReg = h.slotRegistrations[1]
@@ -1120,22 +1125,24 @@ test('client bundle registers the dock, the score chip, and the sidebar tab', as
   const quiet = scoreReg.component({ messageId: 'msg-without-score' })
   ok(quiet === null, `score chip renders null without a score, got ${JSON.stringify(quiet)}`)
 
-  // Collapsed by default => the iframe is UNMOUNTED so a closed dock never
-  // runs the page's poll timers.
-  const collapsed = component({ sessionId: 's1' })
-  ok(collapsed && collapsed.type === 'div', 'dock root is a div')
-  ok(findNode(collapsed, 'iframe') === null, 'collapsed dock mounts no iframe')
-  const toggle = findNode(collapsed, 'button')
-  ok(toggle, 'collapsed dock renders a toggle button')
-  // The whole strip is one button — icon + label + caret — matching dsh's own
-  // dock headers, so assert on aggregated text plus the aria state.
-  ok(textOf(toggle).includes('Reviewer 配置'), `strip label=${textOf(toggle)}`)
-  ok(toggle.props['aria-expanded'] === false, 'collapsed strip reports aria-expanded=false')
-  // The collapsed strip is deliberately quiet: no address, no deep link.
-  ok(!textOf(toggle).includes('127.0.0.1'), 'collapsed strip hides the address')
-  ok(!textOf(toggle).includes('新标签'), 'collapsed strip hides the deep link')
+  // The view area IS the page: the mount fills its container and iframes the
+  // standalone config page straight away. Health is probed, but only a PROVEN
+  // failure swaps the frame out, so an unprobed mount still shows the form.
+  const viewTree = component({
+    inspectCall() {},
+    viewRequest: undefined,
+    openView() {},
+    completeViewRequest() {},
+  })
+  ok(viewTree && viewTree.type === 'div', 'view root is a div')
+  const viewIframe = findNode(viewTree, 'iframe')
+  ok(viewIframe, 'view tree contains an iframe')
+  ok(
+    viewIframe.props.src === 'http://127.0.0.1:3987/',
+    `view iframe src=${viewIframe.props.src}`
+  )
 
-  // Screenshot the second mount too.
+  // --- mount 3 (optional): the betterSidebar tab ---------------------------
   ok(h.registered.length === 1, `one tab registered, got ${h.registered.length}`)
   const desc = h.registered[0]
   ok(desc.id === 'dsh-answer-reviewer:config', `tab id=${desc.id}`)
@@ -1152,68 +1159,56 @@ test('client bundle registers the dock, the score chip, and the sidebar tab', as
   )
 })
 
-test('expanded dock mounts the config iframe and a collapse control', () => {
-  // localStorage remembers the expanded state across reloads.
-  const h = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
+test('the config tab fills the view area and mounts the standalone page', () => {
+  const h = loadClientBundle()
   h.exports.apply(h.ctx)
   for (const fn of h.effects) fn()
   const { component } = h.slotRegistrations[0]
 
-  const tree = component({ sessionId: 's1' })
+  const tree = component({})
+  // The view area is a flex cell of whatever size the host gives it, so the
+  // mount must stretch BOTH axes and allow shrinking. A fixed height would
+  // leave the settings form letterboxed into a strip.
+  const style = tree.props.style
+  ok(style.width === '100%', `view width=${style.width}`)
+  ok(style.height === '100%', `view height=${style.height}`)
+  ok(style.minHeight === 0, 'view allows its content to shrink')
+  ok(style.display === 'flex' && style.flexDirection === 'column', 'view stacks header over frame')
+  ok(style.overflow === 'hidden', 'view clips to the view area')
+  ok(style.boxSizing === 'border-box', `view boxSizing=${style.boxSizing}`)
+
   const iframe = findNode(tree, 'iframe')
-  ok(iframe, 'expanded dock mounts an iframe')
-  ok(
-    iframe.props.src === 'http://127.0.0.1:3987/',
-    `dock iframe src=${iframe.props.src}, expected the standalone config page`
-  )
-  const toggle = findNode(tree, 'button')
-  ok(toggle && toggle.props['aria-expanded'] === true, 'expanded strip reports aria-expanded=true')
-  ok(
-    textOf(toggle).includes('127.0.0.1:3987'),
-    `expanded strip surfaces the address: ${textOf(toggle)}`
-  )
-  ok(textOf(toggle).includes('新标签'), 'expanded strip offers the deep link')
-  // A dead config server must not leave the user staring at a blank frame.
-  ok(findAllNodes(tree, 'iframe').length === 1, 'exactly one iframe while expanded')
+  ok(iframe, 'the standalone page is mounted')
+  ok(iframe.props.src === 'http://127.0.0.1:3987/', `iframe src=${iframe.props.src}`)
+  ok(iframe.props.style.flex === '1 1 auto', `iframe flex=${iframe.props.style.flex}`)
+  ok(iframe.props.style.height === '100%', `iframe height=${iframe.props.style.height}`)
+
+  // The tab strip already shows the title, so the page header carries only
+  // what a tab label cannot: the address and a deep link out.
+  const text = textOf(tree)
+  ok(text.includes('127.0.0.1:3987'), `header surfaces the address: ${text}`)
+  ok(text.includes('新标签打开'), 'header offers the deep link')
+  const link = findAllNodes(tree, 'a')[0]
+  ok(link, 'header renders a deep link')
+  ok(link.props.href === 'http://127.0.0.1:3987/', `deep link href=${link.props.href}`)
+  ok(link.props.target === '_blank', 'deep link opens in a new tab')
+  ok(findAllNodes(tree, 'iframe').length === 1, 'exactly one iframe')
 })
 
-test('dock geometry cannot be crushed by the composer column', () => {
-  // Regression guard. `conversation.input.dock` entries are direct flex
-  // children of dsh's fixed-height `.composerStack`. With the default
-  // `flex-shrink: 1` the dock was squeezed to ~10px and its own
-  // `overflow: hidden` clipped the label into an unreadable sliver.
-  // `flex: none` is what stops that, and the width formula is what keeps the
-  // strip aligned with the composer card instead of the whole column.
-  const h = loadClientBundle({ storage: { getItem: () => '0', setItem() {} } })
+test('the config tab has no collapse control and no overlay', () => {
+  // A tab is not a dock. The old surface needed a toggle button, persisted
+  // open/closed state and an absolutely positioned overlay so that expanding
+  // it would not reflow the transcript. Inside the view ring none of that
+  // exists: the host renders an entry only while it is the ACTIVE tab
+  // (`renderSlot("conversation.view", props, { only: viewId })`), so
+  // activation IS the mount signal and switching away unmounts the iframe.
+  const h = loadClientBundle()
   h.exports.apply(h.ctx)
   for (const fn of h.effects) fn()
-  const tree = h.slotRegistrations[0].component({ sessionId: 's1' })
+  const tree = h.slotRegistrations[0].component({})
 
-  ok(tree.props.style.flex === 'none', `dock root flex=${tree.props.style.flex}`)
-  const width = String(tree.props.style.width || '')
-  ok(width.includes('100% -'), `dock width is inset-based: ${width}`)
-  ok(
-    width.includes('--dsh-composer-side-clearance') &&
-      width.includes('--dsh-composer-dock-inset'),
-    `dock width reuses the composer geometry vars: ${width}`
-  )
-  ok(
-    String(tree.props.style.maxWidth).includes('--dsh-composer-card-max-width'),
-    `dock maxWidth reuses the composer card width: ${tree.props.style.maxWidth}`
-  )
-  ok(tree.props.style.position === 'relative', 'dock root is a positioning context')
-})
+  ok(findAllNodes(tree, 'button').length === 0, 'no toggle button survives the move')
 
-test('expanded dock overlays instead of reflowing the transcript', () => {
-  // The panel must be taken OUT of flow. An inline panel inside the fixed
-  // composer column pushes the composer down and reflows every message,
-  // which is exactly the "intrusive" behaviour that was reported.
-  const h = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
-  h.exports.apply(h.ctx)
-  for (const fn of h.effects) fn()
-  const tree = h.slotRegistrations[0].component({ sessionId: 's1' })
-
-  // The overlay is the absolutely positioned child that is NOT the strip.
   const positioned = []
   const walk = (node) => {
     if (!node || typeof node !== 'object') return
@@ -1225,41 +1220,32 @@ test('expanded dock overlays instead of reflowing the transcript', () => {
     else if (kids && typeof kids === 'object') walk(kids)
   }
   walk(tree)
-  ok(positioned.length === 1, `exactly one absolutely positioned panel, got ${positioned.length}`)
-  const overlay = positioned[0]
-  ok(overlay.props.style.bottom === '100%', `overlay bottom=${overlay.props.style.bottom}`)
-  ok(
-    String(overlay.props.style.height).includes('vh'),
-    `overlay height is viewport-capped: ${overlay.props.style.height}`
-  )
-  ok(findNode(overlay, 'iframe'), 'the iframe lives inside the overlay')
+  ok(positioned.length === 0, `nothing is taken out of flow, got ${positioned.length}`)
 
-  // And the strip itself must stay in flow, directly above the composer.
-  const strip = tree.children[1]
-  ok(strip && strip.props.style.position === 'relative', 'strip is the in-flow sibling')
+  // The dock's persisted open/closed state is gone with the dock.
+  const src = readFileSync(resolve(pkgRoot, 'lib/client.js'), 'utf8')
+  ok(!/localStorage/.test(src), 'bundle no longer touches localStorage')
 })
 
-test('dock embeds the SAME page as the sidebar tab (single source of truth)', () => {
-  // Both mounts iframe the standalone server, so the HTTP API and both UI
-  // mounts share one ConfigStore and cannot drift.
-  const collapsed = loadClientBundle({ storage: { getItem: () => '0', setItem() {} } })
-  collapsed.exports.apply(collapsed.ctx)
-  for (const fn of collapsed.effects) fn()
-  const dockComponent = collapsed.slotRegistrations[0].component
-  const tabComponent = collapsed.registered[0].component
+test('both mounts embed the SAME page (single source of truth)', () => {
+  // The view tab and the optional sidebar tab iframe the same standalone
+  // server, so the HTTP API and both UI mounts share one ConfigStore and
+  // cannot drift.
+  const h = loadClientBundle()
+  h.exports.apply(h.ctx)
+  for (const fn of h.effects) fn()
 
-  // Force the dock open by replaying with storage = expanded.
-  const expanded = loadClientBundle({ storage: { getItem: () => '1', setItem() {} } })
-  expanded.exports.apply(expanded.ctx)
-  for (const fn of expanded.effects) fn()
-  const dockIframe = findNode(expanded.slotRegistrations[0].component({}), 'iframe')
+  const viewComponent = h.slotRegistrations[0].component
+  const tabComponent = h.registered[0].component
+  ok(typeof viewComponent === 'function', 'view component is a function')
+
+  const viewIframe = findNode(viewComponent({}), 'iframe')
   const tabIframe = findNode(tabComponent({ visible: true }), 'iframe')
-  ok(dockIframe && tabIframe, 'both mounts render an iframe')
+  ok(viewIframe && tabIframe, 'both mounts render an iframe')
   ok(
-    dockIframe.props.src === tabIframe.props.src,
-    `dock=${dockIframe.props.src} tab=${tabIframe.props.src}`
+    viewIframe.props.src === tabIframe.props.src,
+    `view=${viewIframe.props.src} tab=${tabIframe.props.src}`
   )
-  ok(typeof dockComponent === 'function', 'dock component is a function')
 })
 
 test('score chip renders the score, its band, and the retry count', () => {
