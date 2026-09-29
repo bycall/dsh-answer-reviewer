@@ -1,3 +1,5 @@
+<img width="2200" height="1300" alt="image" src="https://github.com/user-attachments/assets/d7c8bb85-d183-4017-9c39-128595027bdb" />
+
 # dsh-answer-reviewer
 
 A dsh host plugin: every time the agent is about to close a turn, the
