@@ -23,8 +23,9 @@ from the optional sidebar tab, from the self-hosted config UI on
 turns of the host go through with the defaults if the file is absent.
 
 The review model sees **every real user prompt** the user has issued in
-the session (any `user/message` event whose `source.kind` is not
-`'plugin'`), tagged `<all_user_prompts>`, plus the assistant's final
+the session (any `user/message` event whose `source.kind` is `'user'`,
+the host's marker for typed input), tagged `<all_user_prompts>`, plus
+the assistant's final
 reply under `<reply>`. Plugin-injected context (file-change notices,
 AGENTS.md, skill content, system reminders) is filtered out so the
 reviewer scores against what the user actually asked, not against the
@@ -102,8 +103,9 @@ does mirror the same payload at `/api/reviews` for `curl`.
 
 The review model uses a strict JSON-only grader prompt (`{score, reason}`)
 that the agent never sees directly. The findings are injected back as a
-`user/message` with `source: { kind: 'plugin', plugin:
-'dsh-answer-reviewer' }`, so the agent treats them as user input — but
+`user/message` with the producer-owned source
+`{ kind: 'dsh-answer-reviewer', note: 'steer-<n>/<cap>' }`, so the agent
+treats them as user input — but
 the agent is explicitly told not to mention the review to the user. A
 different provider/model reduces the chance that a self-graded check
 rubber-stamps its own work, and the explicit numerical gate means a
