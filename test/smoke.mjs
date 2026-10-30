@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import net from 'node:net'
 import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
@@ -147,6 +148,26 @@ async function makeTestStore(overrides = {}) {
   const store = await createConfigStore({ defaults, filePath, logger: { info() {}, warn() {} } })
   await store.load()
   return { store, dir, filePath, defaults, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** Reserve a free loopback port, then release it so a test can bind it. */
+async function freePort() {
+  const server = net.createServer()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+/** Poll `check` until it returns true (or throw at the deadline). */
+async function waitFor(check, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  let lastError
+  while (Date.now() < deadline) {
+    try { if (await check()) return } catch (error) { lastError = error }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ''}`)
 }
 
 test('name exports the right plugin id', () => {
@@ -850,6 +871,89 @@ test('startServer DELETE wipes overrides back to defaults', async () => {
     ok(after.config.threshold === 80, 'threshold back to default')
     ok(after.source === 'defaults', 'source reports defaults after DELETE')
   } finally { handle?.close(); cleanup() }
+})
+
+// The config server is a real listener on 127.0.0.1. A surviving listener (or
+// a keep-alive connection it never destroyed) keeps the Node event loop alive,
+// which is exactly why dsh Desktop update-stops failed on 0.7.6: the Host
+// acknowledged the stop, then never exited within the shell's graceful
+// deadline ("Host did not complete graceful task teardown").
+test('close() destroys a keep-alive connection instead of leaving it to pin the loop', async () => {
+  const { store, cleanup } = await makeTestStore()
+  let handle
+  let socket
+  try {
+    handle = await startServer(store, { host: '127.0.0.1', port: 0, logger: { info() {}, warn() {} } })
+    socket = net.connect(handle.port, '127.0.0.1')
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+    socket.setEncoding('utf8')
+    const health = new Promise((resolve, reject) => {
+      let body = ''
+      socket.on('data', (chunk) => { body += chunk; if (body.includes('"ok":true')) resolve() })
+      socket.once('error', reject)
+    })
+    socket.write(`GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:${handle.port}\r\nConnection: keep-alive\r\n\r\n`)
+    await health
+    ok(socket.destroyed === false, 'keep-alive connection is open before close()')
+    handle.close()
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('keep-alive connection survived close()')), 2000)
+      socket.once('close', () => { clearTimeout(timer); resolve() })
+    })
+  } finally {
+    socket?.destroy()
+    handle?.close()
+    cleanup()
+  }
+})
+
+// Cordis disposes plugin resources through effect disposers. The sidecar must
+// be closed from there — the previous code registered plain event listeners
+// for 'dispose' / 'cordis/dispose' / 'host/dispose', which cordis never emits,
+// so the listener outlived the Host teardown and blocked process exit.
+test('apply() closes the config server when the host disposes the plugin', async () => {
+  const port = await freePort()
+  const dir = mkdtempSync(resolve(tmpdir(), 'dsh-reviewer-apply-'))
+  const saved = {
+    REVIEWER_HTTP: process.env.REVIEWER_HTTP,
+    REVIEWER_HTTP_PORT: process.env.REVIEWER_HTTP_PORT,
+    REVIEWER_CONFIG_PATH: process.env.REVIEWER_CONFIG_PATH,
+  }
+  process.env.REVIEWER_HTTP_PORT = String(port)
+  process.env.REVIEWER_CONFIG_PATH = resolve(dir, 'config.json')
+  delete process.env.REVIEWER_HTTP
+
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    on() {},
+    inject() {},
+    effect(execute) {
+      const disposer = execute()
+      disposers.push(disposer)
+      return () => disposer?.()
+    },
+  }
+  const disposeAll = async () => {
+    for (const disposer of disposers.splice(0).reverse()) await disposer?.()
+  }
+
+  try {
+    plugin.apply(ctx)
+    await waitFor(async () => (await fetch(`http://127.0.0.1:${port}/api/health`)).ok, 'config server to listen')
+    ok(disposers.length === 1, `apply() registered ${disposers.length} effect disposers, want 1`)
+    await disposeAll()
+    await waitFor(async () => {
+      try { await fetch(`http://127.0.0.1:${port}/api/health`); return false } catch { return true }
+    }, 'config server to close on dispose')
+  } finally {
+    await disposeAll().catch(() => {})
+    rmSync(dir, { recursive: true, force: true })
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
 })
 
 // --- per-message scores -----------------------------------------------------
