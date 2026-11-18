@@ -12,7 +12,8 @@
  * Exit code 0 = all green.
  */
 
-import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, lstatSync, readlinkSync, symlinkSync, mkdtempSync, rmSync, readFileSync, readdirSync, realpathSync, unlinkSync } from 'node:fs'
+import { spawnSync, execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -41,6 +42,12 @@ function hostModuleRoots() {
   const push = (p) => {
     if (p && !seen.has(p)) { seen.add(p); roots.push(p) }
   }
+  // 0) dsh >= 0.2.2 ships as a signed desktop app: the whole runtime lives
+  //    INSIDE `Contents/Resources/app.asar`, so there is no on-disk
+  //    `@deepseek-ai/*` tree to point at any more. Only Electron's patched
+  //    `fs` can read it, which is why this harness re-execs itself under
+  //    `ELECTRON_RUN_AS_NODE` further down.
+  for (const asar of asarHostRoots()) push(asar)
   // 1) The active managed-runtime global install: `versions/current` names
   //    it, and the plain sweep covers a stale/missing marker.
   try {
@@ -63,6 +70,39 @@ function hostModuleRoots() {
   push(resolve(pkgRoot, 'node_modules'))
   return roots
 }
+
+/** `node_modules` dirs that live inside a dsh desktop `app.asar`, newest layout first. */
+function asarHostRoots() {
+  const out = []
+  // (a) Ask the `dsh` on PATH where it lives: the launcher is a shell script
+  //     that ends in `exec ... "$resources/app.asar/dsh/node_modules/.../cli.js"`.
+  try {
+    const bin = execFileSync('zsh', ['-lc', 'command -v dsh'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    if (bin) {
+      const s = readFileSync(bin, 'utf8')
+      const m = s.match(/(\/[^\s"']*?\.app\/Contents\/Resources\/app\.asar)/)
+      if (m) out.push(`${m[1]}/dsh/node_modules`)
+    }
+  } catch { /* no dsh on PATH, or not a desktop build */ }
+  // (b) Well-known bundle locations. Only dsh desktop builds qualify — many
+  //     unrelated Electron apps also ship an `app.asar`, and one of them
+  //     (a browser) sorts first in /Applications and would be picked by
+  //     accident. The `runtime/cli/bin/dsh` launcher is on real disk, so it
+  //     is a reliable discriminator that plain Node can stat.
+  for (const base of ['/Applications', resolve(process.env.HOME || '', 'Applications')]) {
+    try {
+      for (const entry of readdirSync(base)) {
+        if (!/\.app$/.test(entry)) continue
+        const contents = `${base}/${entry}/Contents/Resources`
+        if (!existsSync(`${contents}/runtime/cli/bin/dsh`)) continue
+        if (!existsSync(`${contents}/app.asar`)) continue
+        out.push(`${contents}/app.asar/dsh/node_modules`)
+      }
+    } catch { /* unreadable */ }
+  }
+  return out
+}
+
 
 /**
  * Resolve a peer package against the dsh host install, falling back to
@@ -96,18 +136,69 @@ function ensurePeerLink(pkg) {
   try { existing = lstatSync(link) } catch { existing = null }
   if (existing) {
     if (existing.isSymbolicLink()) {
-      const target = readlinkSync(link)
+      let target = null
+      try { target = readlinkSync(link) } catch { /* unreadable link */ }
       if (target === real) return
+      // Stale link: it still points at a runtime directory that a dsh
+      // upgrade has since deleted. Leaving it in place would make the
+      // ESM import below fail with MODULE_NOT_FOUND, so repoint it.
+      try { unlinkSync(link); symlinkSync(real, link); return } catch { return }
     }
     return
   }
   symlinkSync(real, link)
 }
 
-ensurePeerLink('cordis')
-ensurePeerLink('dsh-llm')
-ensurePeerLink('dsh-session')
-ensurePeerLink('schemastery')
+/**
+ * dsh >= 0.2.2 ships its runtime inside a desktop `app.asar`, which only
+ * Electron's patched `fs` can traverse — plain Node cannot resolve a single
+ * `@deepseek-ai/*` peer there. Re-exec this file under the desktop binary in
+ * `ELECTRON_RUN_AS_NODE` mode so the very same assertions still run.
+ *
+ * Guarded by an env marker (not `process.versions.electron`, which is also
+ * set in the child) so a failed re-exec can never recurse.
+ */
+function reexecUnderElectronIfNeeded() {
+  if (process.env.DSH_SMOKE_REEXEC === '1') return
+  if (process.versions.electron) return
+  if (resolveHostPath('dsh-llm')) return  // a real on-disk install exists
+  const roots = asarHostRoots()
+  if (!roots.length) return
+  const resources = roots[0].replace(/\/dsh\/node_modules$/, '')
+  const appDir = resources.replace(/\/Contents\/Resources\/app\.asar$/, '')
+  const binary = resolve(appDir, 'Contents/MacOS', appDir.split('/').pop().replace(/\.app$/, ''))
+  if (!existsSync(binary)) return
+  console.log(`smoke: host peers live inside app.asar — re-running under ${binary} (ELECTRON_RUN_AS_NODE)`)
+  const r = spawnSync(binary, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    stdio: 'inherit',
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_SMOKE_REEXEC: '1' },
+  })
+  process.exit(typeof r.status === 'number' ? r.status : 1)
+}
+
+reexecUnderElectronIfNeeded()
+
+/**
+ * Symlinking `@deepseek-ai/*` out of the archive does not work: Node's ESM
+ * resolver stats candidates with a non-asar-aware internal binding, so a link
+ * into `app.asar` reports ENOTDIR. Instead, register a resolve hook that maps
+ * the specifier onto the archive's real file URL — the rest of the graph then
+ * loads normally because every importer is already inside the archive.
+ */
+const asarRoot = process.versions.electron
+  ? asarHostRoots().find((r) => existsSync(`${r}/@deepseek-ai/dsh-llm/package.json`))
+  : null
+if (asarRoot) {
+  process.env.DSH_ASAR_NM = `${asarRoot}/@deepseek-ai`
+  const { register } = await import('node:module')
+  register('./asar-resolve.mjs', import.meta.url)
+  console.log(`smoke: host peers come from app.asar — resolving @deepseek-ai/* → ${asarRoot}`)
+} else {
+  ensurePeerLink('cordis')
+  ensurePeerLink('dsh-llm')
+  ensurePeerLink('dsh-session')
+  ensurePeerLink('schemastery')
+}
 
 const plugin = await import(pathToFileURL(resolve(pkgRoot, 'lib/index.js')).href)
 const {

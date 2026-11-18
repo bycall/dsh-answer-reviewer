@@ -4,6 +4,25 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## 0.7.7 — 2026-11-18
+
+### Fixed
+
+- **Peer ranges did not cover dsh 0.2.2-rc.x, so the plugin was skipped wholesale
+  at boot.** dsh 0.2.0 made peer compatibility a hard gate rather than a warning:
+  a bundle whose range does not cover the running host is dropped before it ever
+  activates. `@deepseek-ai/dsh-llm` and `@deepseek-ai/dsh-session` were declared
+  as `... || ^0.2.0-rc.1`, and that clause does **not** reach `0.2.2-rc.3` —
+  npm's prerelease rule only lets a prerelease match when a comparator in the
+  same set shares its `[major, minor, patch]` tuple, and `0.2.0-rc.1` is tuple
+  `[0,2,0]` while `0.2.2-rc.3` is `[0,2,2]`. Both now carry `|| ^0.2.2-rc.1`.
+
+  No source change was needed: the API surface check against 0.2.2-rc.3 reports
+  `total missing members: 0` (both `BlockAssembler` and `createUserMessage` are
+  still exported), so this was purely stale metadata. `@deepseek-ai/cordis`
+  (`^4.0.1` → 4.1.0) and `@deepseek-ai/schemastery` (`^3.18.1` → 3.19.0) still
+  satisfy their ranges and were left untouched.
+
 ## 0.7.6 — 2026-09-29
 
 ### Changed
