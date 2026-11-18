@@ -341,15 +341,24 @@ test('extractUserPrompts concatenates user-source messages, drops plugin injecti
     {
       type: 'user/message',
       data: {
+        message: { content: [{ type: 'text', text: 'v4 producer injection' }] },
+        source: { kind: 'plugin:dsh-context', note: 'v4 producer-owned kind' },
+      },
+      seq: 2,
+    },
+    {
+      type: 'user/message',
+      data: {
         message: { content: [{ type: 'text', text: 'second user question' }] },
         source: { kind: 'user' },
       },
-      seq: 2,
+      seq: 3,
     },
   ]
   const out = extractUserPrompts(events)
   ok(out && out.includes('first user question'), 'first user prompt included')
   ok(out && !out.includes('AGENTS.md'), 'plugin-injected context filtered out')
+  ok(out && !out.includes('v4 producer injection'), 'v4 producer-kind injection filtered out')
   ok(out && out.includes('second user question'), 'second user prompt included')
   ok(out && out.includes('---'), 'separator between prompts')
 })
@@ -360,6 +369,14 @@ test('extractUserPrompts returns null when no real user prompts exist', () => {
       type: 'user/message',
       data: { message: { content: [{ type: 'text', text: 'noise' }] }, source: { kind: 'plugin' } },
       seq: 0,
+    },
+    {
+      type: 'user/message',
+      data: {
+        message: { content: [{ type: 'text', text: 'v4 noise' }] },
+        source: { kind: 'plugin:dsh-answer-reviewer' },
+      },
+      seq: 1,
     },
   ]
   ok(extractUserPrompts(events) === null, 'null when only plugin injections exist')
@@ -450,7 +467,11 @@ test('isScoreAcceptable honours threshold', () => {
 test('buildSteerMessage renders score, reason, and the retry position', () => {
   const m = buildSteerMessage({ score: 42, reason: 'mentions rm -rf', attempt: 1, maxAttempts: 5 })
   ok(m.role === 'user', 'role user')
-  ok(m.source && m.source.kind === 'plugin', 'source plugin')
+  // Session format v4 refuses the retired `{ kind: 'plugin' }` wrapper at
+  // admission with `format v4 message requires a producer-owned source kind`,
+  // which fails the whole turn. A third-party producer must use `plugin:<name>`.
+  ok(m.source && m.source.kind === 'plugin:dsh-answer-reviewer', `source kind=${m.source && m.source.kind}`)
+  ok(m.source && m.source.kind !== 'plugin', 'retired v3 plugin wrapper is not used')
   ok(m.source.plugin === 'dsh-answer-reviewer', 'plugin id')
   const text = m.content[0].text
   ok(text.includes('42/100'), 'score rendered')
@@ -485,6 +506,7 @@ test('buildReviewPrompt carries both user prompts and assistant reply', () => {
   ok(block.text.includes('is the macOS ssh helper buggy'), 'user prompt carried')
   ok(block.text.includes('no, it works fine'), 'reply carried')
   ok(p.messages[0].source.plugin === 'dsh-answer-reviewer', 'source plugin id')
+  ok(p.messages[0].source.kind === 'plugin:dsh-answer-reviewer', 'review request carries the v4 producer kind')
 })
 
 test('buildReviewPrompt falls back when userPrompts is empty', () => {

@@ -4,6 +4,24 @@ All notable changes to `dsh-answer-reviewer` are documented here. The plugin
 follows [Semantic Versioning](https://semver.org/); every release bumps
 both `package.json#version` and this file in the same commit.
 
+## Unreleased
+
+### Fixed
+
+- **Below-threshold feedback failed the whole turn on dsh session format v4.**
+  `buildSteerMessage()` stamped the steered message with the v3 plugin wrapper
+  `{ kind: 'plugin', plugin: 'dsh-answer-reviewer' }`. Native v4 admission
+  rejects that retired wrapper with
+  `format v4 message requires a producer-owned source kind`, so the `steer()`
+  raised instead of re-running the step: the turn died, the Session stopped
+  flushing right after `step/end`, and the caller only saw a generic
+  "this turn errored" — the quality gate silently broke every turn it fired on.
+  Third-party producers now use their own kind, `plugin:dsh-answer-reviewer`
+  (exactly what the v3→v4 migrator lifts the old wrapper into).
+- `extractUserPrompts()` skipped only the bare `plugin` kind, so on v4 the
+  plugin's own steer/review messages would have been re-read as if the user had
+  typed them. It now skips every `plugin:`-prefixed kind as well.
+
 ## 0.7.7 — 2026-11-18
 
 ### Fixed
